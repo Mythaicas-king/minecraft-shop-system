@@ -10,6 +10,7 @@ const emptyProductForm = {
   price: '',
   category: '热门补给',
   image_url: '',
+   stock_quantity: '1',
   is_active: true,
 }
 
@@ -942,6 +943,7 @@ function AdminShell() {
   const [siteContentForm, setSiteContentForm] = useState(createDefaultSiteContent)
   const [statusFilter, setStatusFilter] = useState('all')
   const [userSearch, setUserSearch] = useState('')
+  const [productSearch, setProductSearch] = useState('')
   const [inviteForm, setInviteForm] = useState({ count: 1, note: '', assigned_to: '' })
   const [productForm, setProductForm] = useState(emptyProductForm)
   const [editingProductId, setEditingProductId] = useState(null)
@@ -998,6 +1000,15 @@ function AdminShell() {
     setSiteContentForm({ ...createDefaultSiteContent(), ...data })
   }
 
+  const filteredAdminProducts = useMemo(() => {
+    const keyword = productSearch.trim().toLowerCase()
+    if (!keyword) return products
+    return products.filter((product) => {
+      const text = `${product.name} ${product.category} ${product.id}`.toLowerCase()
+      return text.includes(keyword)
+    })
+  }, [productSearch, products])
+
   useEffect(() => {
     if (!tokenReady) return
     if (section === 'orders') loadOrders().catch(() => toast.error('加载订单失败'))
@@ -1052,7 +1063,11 @@ function AdminShell() {
 
   const submitProduct = async (e) => {
     e.preventDefault()
-    const payload = { ...productForm, price: Number(productForm.price) }
+    const payload = {
+      ...productForm,
+      price: Number(productForm.price),
+      stock_quantity: Number(productForm.stock_quantity),
+    }
     if (editingProductId) {
       await api.put(`/admin/products/${editingProductId}`, payload)
       toast.success('商品已更新')
@@ -1073,6 +1088,10 @@ function AdminShell() {
   }
 
   const toggleProduct = async (product) => {
+    if (!product.is_active && Number(product.stock_quantity) <= 0) {
+      toast.error('库存为 0 的商品不能上架，请先补库存')
+      return
+    }
     await api.put(`/admin/products/${product.id}`, { ...product, is_active: !product.is_active })
     toast.success('商品状态已更新')
     loadProducts()
@@ -1261,31 +1280,44 @@ function AdminShell() {
           )}
 
           {section === 'products' && (
-            <section className="panel split-panel">
-              <form className="form-grid" onSubmit={submitProduct}>
+            <section className="panel split-panel product-management-panel">
+              <form className="form-grid product-editor-form" onSubmit={submitProduct}>
                 <h3>{editingProductId ? '编辑商品' : '添加商品'}</h3>
                 <label>商品名称<input value={productForm.name} onChange={(e) => setProductForm((s) => ({ ...s, name: e.target.value }))} /></label>
                 <label>商品描述<textarea value={productForm.description} onChange={(e) => setProductForm((s) => ({ ...s, description: e.target.value }))} /></label>
                 <label>价格<input type="number" value={productForm.price} onChange={(e) => setProductForm((s) => ({ ...s, price: e.target.value }))} /></label>
                 <label>商品分类<input value={productForm.category || ''} onChange={(e) => setProductForm((s) => ({ ...s, category: e.target.value }))} /></label>
+                <label>库存数量<input type="number" min="0" value={productForm.stock_quantity} onChange={(e) => setProductForm((s) => ({ ...s, stock_quantity: e.target.value }))} /></label>
                 <label>图片URL<input value={productForm.image_url} onChange={(e) => setProductForm((s) => ({ ...s, image_url: e.target.value }))} /></label>
                 <UploadDropzone imageUrl={productForm.image_url} loading={imageUploading} onFileSelect={uploadImage} />
                 <label className="switch-row"><input type="checkbox" checked={productForm.is_active} onChange={(e) => setProductForm((s) => ({ ...s, is_active: e.target.checked }))} />上架状态</label>
+                {Number(productForm.stock_quantity) === 0 && <p className="muted">库存为 0 时会自动下架，前台不会继续展示该商品。</p>}
                 <div className="button-group">
                   {editingProductId && <button type="button" className="ghost-button" onClick={() => { setEditingProductId(null); setProductForm(emptyProductForm) }}>取消编辑</button>}
                   <button className="primary-button">{editingProductId ? '保存修改' : '提交商品'}</button>
                 </div>
               </form>
-              <div className="table-wrap">
+              <div className="product-list-panel">
+                <div className="section-toolbar wrap compact-toolbar">
+                  <div>
+                    <h3>商品列表</h3>
+                    <p className="muted">可按商品名、分类或 ID 搜索，并直接查看库存状态。</p>
+                  </div>
+                  <div className="search-inline">
+                    <input placeholder="搜索商品名 / 分类 / ID" value={productSearch} onChange={(e) => setProductSearch(e.target.value)} />
+                  </div>
+                </div>
+                <div className="table-wrap product-table-wrap">
                 <table>
-                  <thead><tr><th>ID</th><th>图片</th><th>名称</th><th>价格</th><th>状态</th><th>操作</th></tr></thead>
+                  <thead><tr><th>ID</th><th>图片</th><th>名称</th><th>价格</th><th>库存</th><th>状态</th><th>操作</th></tr></thead>
                   <tbody>
-                    {products.map((product) => (
+                    {filteredAdminProducts.map((product) => (
                       <tr key={product.id}>
                         <td>{product.id}</td>
                         <td><SafeImage className="thumb" src={product.image_url} alt={product.name} /></td>
                         <td>{product.name}</td>
                         <td>{product.price}</td>
+                        <td>{product.stock_quantity}</td>
                         <td>{product.is_active ? '上架' : '下架'}</td>
                         <td className="row-actions">
                           <button onClick={() => { setEditingProductId(product.id); setProductForm(product) }}>编辑</button>
@@ -1296,6 +1328,7 @@ function AdminShell() {
                     ))}
                   </tbody>
                 </table>
+                </div>
               </div>
             </section>
           )}

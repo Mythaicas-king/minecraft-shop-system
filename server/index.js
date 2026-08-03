@@ -182,6 +182,21 @@ async function query(text, params = []) {
   return pool.query(text, params)
 }
 
+async function withTransaction(run) {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const result = await run(client)
+    await client.query('COMMIT')
+    return result
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
 async function getRow(text, params = []) {
   const { rows } = await query(text, params)
   return rows[0]
@@ -245,6 +260,12 @@ function verifyCaptchaResponse(token, answer, purpose) {
   }
 }
 
+function parseNonNegativeInt(value) {
+  const normalized = Number(value)
+  if (!Number.isInteger(normalized) || normalized < 0) return null
+  return normalized
+}
+
 function getBearerToken(req) {
   const header = req.headers.authorization || ''
   const [, token] = header.split(' ')
@@ -295,6 +316,7 @@ function normalizeProduct(row) {
     price: row.price,
     category: row.category,
     image_url: row.image_url,
+    stock_quantity: row.stock_quantity,
     is_active: row.is_active,
     created_at: row.created_at,
   }
@@ -366,11 +388,13 @@ async function initDatabase() {
       price INTEGER NOT NULL,
       category TEXT NOT NULL DEFAULT '热门补给',
       image_url TEXT NOT NULL,
+      stock_quantity INTEGER NOT NULL DEFAULT 1,
       is_active BOOLEAN NOT NULL DEFAULT TRUE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `)
   await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT '热门补给'`)
+  await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS stock_quantity INTEGER NOT NULL DEFAULT 1`)
   await query(`
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
@@ -450,13 +474,13 @@ async function ensureSeedData() {
   const productCount = await getRow('SELECT COUNT(*)::int AS count FROM products')
   if (productCount.count === 0) {
     const demoProducts = [
-      ['附魔钻石新手包', '适合新玩家快速开荒，包含钻石装备、食物与基础药水。', 188, '热门补给', 'https://picsum.photos/seed/mc-diamond-kit/900/600', true],
-      ['金苹果战备箱', '高强度 PvP 与首领挑战常用补给，主打恢复和容错。', 100, '战斗物资', 'https://picsum.photos/seed/mc-golden-apple/900/600', true],
-      ['矿工效率工具组', '提供高效率采集体验，适合长期生存服资源积累。', 72, '挖矿工具', 'https://picsum.photos/seed/mc-miner-bundle/900/600', true],
+      ['附魔钻石新手包', '适合新玩家快速开荒，包含钻石装备、食物与基础药水。', 188, '热门补给', 'https://picsum.photos/seed/mc-diamond-kit/900/600', 20, true],
+      ['金苹果战备箱', '高强度 PvP 与首领挑战常用补给，主打恢复和容错。', 100, '战斗物资', 'https://picsum.photos/seed/mc-golden-apple/900/600', 20, true],
+      ['矿工效率工具组', '提供高效率采集体验，适合长期生存服资源积累。', 72, '挖矿工具', 'https://picsum.photos/seed/mc-miner-bundle/900/600', 20, true],
     ]
     for (const product of demoProducts) {
       await query(
-        'INSERT INTO products (name, description, price, category, image_url, is_active) VALUES ($1, $2, $3, $4, $5, $6)',
+        'INSERT INTO products (name, description, price, category, image_url, stock_quantity, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7)',
         product,
       )
     }
@@ -615,21 +639,36 @@ app.post('/api/orders', userAuthRequired, async (req, res) => {
     }
 
     const productIds = [...new Set(items.map((item) => Number(item.product_id)).filter(Boolean))]
-    const products = productIds.length
-      ? await getRows('SELECT * FROM products WHERE id = ANY($1::int[])', [productIds])
-      : []
-    const productMap = new Map(products.map((product) => [product.id, product]))
-
     const normalizedItems = []
     let totalPrice = 0
-    for (const item of items) {
-      const product = productMap.get(Number(item.product_id))
-      const quantity = Number(item.quantity || 0)
-      if (!product || !product.is_active) return res.status(400).json({ message: '商品不存在或已下架' })
-      if (!Number.isInteger(quantity) || quantity <= 0) return res.status(400).json({ message: '商品数量必须为正整数' })
-      normalizedItems.push({ product_id: product.id, name: product.name, price: product.price, quantity })
-      totalPrice += product.price * quantity
-    }
+
+    const orderResult = await withTransaction(async (client) => {
+      const { rows: products } = productIds.length
+        ? await client.query('SELECT * FROM products WHERE id = ANY($1::int[]) FOR UPDATE', [productIds])
+        : { rows: [] }
+      const productMap = new Map(products.map((product) => [product.id, product]))
+
+      for (const item of items) {
+        const product = productMap.get(Number(item.product_id))
+        const quantity = Number(item.quantity || 0)
+        if (!product || !product.is_active) {
+          const error = new Error('商品不存在或已下架')
+          error.statusCode = 400
+          throw error
+        }
+        if (!Number.isInteger(quantity) || quantity <= 0) {
+          const error = new Error('商品数量必须为正整数')
+          error.statusCode = 400
+          throw error
+        }
+        if (product.stock_quantity < quantity) {
+          const error = new Error(`${product.name} 库存不足，当前仅剩 ${product.stock_quantity}`)
+          error.statusCode = 400
+          throw error
+        }
+        normalizedItems.push({ product_id: product.id, name: product.name, price: product.price, quantity })
+        totalPrice += product.price * quantity
+      }
 
     let orderNumber = generateOrderNumber()
     let apiKey = generateApiKey()
@@ -638,22 +677,35 @@ app.post('/api/orders', userAuthRequired, async (req, res) => {
       apiKey = generateApiKey()
     }
 
-    await query(
-      `INSERT INTO orders
-      (order_number, api_key, user_id, account_username, player_id, items, total_price, status, note, email)
-      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'pending', $8, $9)`,
-      [
-        orderNumber,
-        apiKey,
-        activeUser?.id || null,
-        activeUser?.username || null,
-        normalizedPlayerId,
-        JSON.stringify(normalizedItems),
-        totalPrice,
-        String(note || ''),
-        activeUser?.email || normalizedEmail,
-      ],
-    )
+      for (const item of normalizedItems) {
+        await client.query(
+          `UPDATE products
+           SET stock_quantity = stock_quantity - $1,
+               is_active = CASE WHEN stock_quantity - $1 <= 0 THEN FALSE ELSE is_active END
+           WHERE id = $2`,
+          [item.quantity, item.product_id],
+        )
+      }
+
+      await client.query(
+        `INSERT INTO orders
+        (order_number, api_key, user_id, account_username, player_id, items, total_price, status, note, email)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'pending', $8, $9)`,
+        [
+          orderNumber,
+          apiKey,
+          activeUser?.id || null,
+          activeUser?.username || null,
+          normalizedPlayerId,
+          JSON.stringify(normalizedItems),
+          totalPrice,
+          String(note || ''),
+          activeUser?.email || normalizedEmail,
+        ],
+      )
+
+      return { normalizedItems, totalPrice, orderNumber, apiKey }
+    })
 
     await logAction('order_created', {
       orderNumber,
@@ -669,13 +721,14 @@ app.post('/api/orders', userAuthRequired, async (req, res) => {
       user_id: activeUser?.id || null,
       account_username: activeUser?.username || null,
       player_id: normalizedPlayerId,
-      items: normalizedItems,
-      total_price: totalPrice,
+      items: orderResult.normalizedItems,
+      total_price: orderResult.totalPrice,
       note: String(note || ''),
       email: activeUser?.email || normalizedEmail,
       status: 'pending',
     })
-  } catch {
+  } catch (error) {
+    if (error?.statusCode) return res.status(error.statusCode).json({ message: error.message })
     res.status(500).json({ message: '提交订单失败' })
   }
 })
@@ -814,15 +867,24 @@ app.get('/api/admin/products', authRequired, async (req, res) => {
 
 app.post('/api/admin/products', authRequired, async (req, res) => {
   try {
-    const { name, description, price, category = '热门补给', image_url, is_active = true } = req.body || {}
-    if (!name || !description || !image_url || !String(category).trim() || !Number.isInteger(Number(price))) {
+    const { name, description, price, category = '热门补给', image_url, stock_quantity, is_active = true } = req.body || {}
+    const normalizedStock = parseNonNegativeInt(stock_quantity)
+    if (!name || !description || !image_url || !String(category).trim() || !Number.isInteger(Number(price)) || normalizedStock === null) {
       return res.status(400).json({ message: '请填写完整且正确的商品信息' })
     }
     const created = await getRow(
-      `INSERT INTO products (name, description, price, category, image_url, is_active)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO products (name, description, price, category, image_url, stock_quantity, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [String(name).trim(), String(description).trim(), Number(price), String(category).trim(), String(image_url).trim(), Boolean(is_active)],
+      [
+        String(name).trim(),
+        String(description).trim(),
+        Number(price),
+        String(category).trim(),
+        String(image_url).trim(),
+        normalizedStock,
+        Boolean(is_active) && normalizedStock > 0,
+      ],
     )
     await logAction('product_created', { id: created.id, admin: req.admin.username })
     res.status(201).json(normalizeProduct(created))
@@ -834,13 +896,15 @@ app.post('/api/admin/products', authRequired, async (req, res) => {
 app.put('/api/admin/products/:id', authRequired, async (req, res) => {
   try {
     const { id } = req.params
-    const { name, description, price, category, image_url, is_active } = req.body || {}
+    const { name, description, price, category, image_url, stock_quantity, is_active } = req.body || {}
     const product = await getRow('SELECT * FROM products WHERE id = $1', [id])
     if (!product) return res.status(404).json({ message: '商品不存在' })
+    const normalizedStock = stock_quantity === undefined ? product.stock_quantity : parseNonNegativeInt(stock_quantity)
+    if (normalizedStock === null) return res.status(400).json({ message: '库存必须是大于等于 0 的整数' })
     const updated = await getRow(
       `UPDATE products
-       SET name = $1, description = $2, price = $3, category = $4, image_url = $5, is_active = $6
-       WHERE id = $7
+       SET name = $1, description = $2, price = $3, category = $4, image_url = $5, stock_quantity = $6, is_active = $7
+       WHERE id = $8
        RETURNING *`,
       [
         String(name ?? product.name).trim(),
@@ -848,7 +912,8 @@ app.put('/api/admin/products/:id', authRequired, async (req, res) => {
         Number.isInteger(Number(price)) ? Number(price) : product.price,
         String(category ?? product.category).trim(),
         String(image_url ?? product.image_url).trim(),
-        typeof is_active === 'boolean' ? is_active : product.is_active,
+        normalizedStock,
+        normalizedStock > 0 && (typeof is_active === 'boolean' ? is_active : product.is_active),
         id,
       ],
     )
