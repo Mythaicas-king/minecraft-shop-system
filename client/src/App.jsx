@@ -1030,6 +1030,7 @@ function AdminShell() {
   const [siteContentForm, setSiteContentForm] = useState(createDefaultSiteContent)
   const [statusFilter, setStatusFilter] = useState('all')
   const [feedbackStatusFilter, setFeedbackStatusFilter] = useState('all')
+  const [inviteUsageFilter, setInviteUsageFilter] = useState('all')
   const [userSearch, setUserSearch] = useState('')
   const [productSearch, setProductSearch] = useState('')
   const [inviteForm, setInviteForm] = useState({ count: 1, note: '', assigned_to: '' })
@@ -1101,6 +1102,12 @@ function AdminShell() {
       return text.includes(keyword)
     })
   }, [productSearch, products])
+
+  const filteredInvites = useMemo(() => {
+    if (inviteUsageFilter === 'unused') return invites.filter((invite) => !invite.is_used)
+    if (inviteUsageFilter === 'used') return invites.filter((invite) => invite.is_used)
+    return invites
+  }, [inviteUsageFilter, invites])
 
   useEffect(() => {
     if (!tokenReady) return
@@ -1353,7 +1360,7 @@ function AdminShell() {
                   <option value="cancelled">已取消</option>
                 </select>
               </div>
-              <div className="table-wrap">
+              <div className="table-wrap admin-table-wrap">
                 <table>
                   <thead>
                     <tr><th>订单号</th><th>关联账号</th><th>游戏ID</th><th>商品</th><th>总价</th><th>状态</th><th>提交时间</th><th>操作</th></tr>
@@ -1509,7 +1516,7 @@ function AdminShell() {
                 </div>
                 <button className="primary-button" onClick={() => setAdminModalOpen(true)}>添加管理员</button>
               </div>
-              <div className="table-wrap">
+              <div className="table-wrap admin-table-wrap">
                 <table>
                   <thead><tr><th>ID</th><th>用户名</th><th>创建时间</th><th>操作</th></tr></thead>
                   <tbody>
@@ -1542,7 +1549,7 @@ function AdminShell() {
                   <button className="primary-button">搜索</button>
                 </form>
               </div>
-              <div className="table-wrap">
+              <div className="table-wrap admin-table-wrap">
                 <table>
                   <thead><tr><th>账号名</th><th>游戏ID</th><th>邀请码</th><th>邮箱</th><th>状态</th><th>最近登录</th><th>操作</th></tr></thead>
                   <tbody>
@@ -1575,19 +1582,31 @@ function AdminShell() {
           )}
 
           {section === 'invites' && (
-            <section className="panel split-panel invite-split-panel">
-              <form className="form-grid" onSubmit={submitInvites}>
+            <section className="panel split-panel invite-split-panel product-management-panel">
+              <form className="form-grid product-editor-form" onSubmit={submitInvites}>
                 <h3>邀请码生成器</h3>
                 <label>生成数量<input type="number" min="1" max="50" value={inviteForm.count} onChange={(e) => setInviteForm((current) => ({ ...current, count: e.target.value }))} /></label>
                 <label>分发对象备注<input value={inviteForm.assigned_to} onChange={(e) => setInviteForm((current) => ({ ...current, assigned_to: e.target.value }))} placeholder="例如：8月活动群 / 玩家昵称" /></label>
                 <label>附加说明<textarea value={inviteForm.note} onChange={(e) => setInviteForm((current) => ({ ...current, note: e.target.value }))} placeholder="例如：仅限内测玩家，每码限 1 人使用" /></label>
                 <button className="primary-button">生成邀请码</button>
               </form>
-              <div className="table-wrap">
+              <div className="product-list-panel">
+                <div className="section-toolbar wrap compact-toolbar">
+                  <div>
+                    <h3>邀请码列表</h3>
+                    <p className="muted">按使用状态筛选邀请码，优先查看未使用分类，避免页面无限拉长。</p>
+                  </div>
+                  <select value={inviteUsageFilter} onChange={(e) => setInviteUsageFilter(e.target.value)}>
+                    <option value="all">全部邀请码</option>
+                    <option value="unused">未使用</option>
+                    <option value="used">已使用</option>
+                  </select>
+                </div>
+                <div className="table-wrap admin-table-wrap product-table-wrap">
                 <table>
                   <thead><tr><th>邀请码</th><th>分发对象</th><th>说明</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
                   <tbody>
-                    {invites.map((invite) => (
+                    {filteredInvites.map((invite) => (
                       <tr key={invite.id}>
                         <td><code>{invite.code}</code></td>
                         <td>{invite.assigned_to || '-'}</td>
@@ -1607,6 +1626,7 @@ function AdminShell() {
                     ))}
                   </tbody>
                 </table>
+                </div>
               </div>
             </section>
           )}
@@ -1624,7 +1644,7 @@ function AdminShell() {
                   <option value="processed">已处理</option>
                 </select>
               </div>
-              <div className="table-wrap">
+              <div className="table-wrap admin-table-wrap">
                 <table>
                   <thead><tr><th>ID</th><th>提交时间</th><th>账号名</th><th>联系方式</th><th>内容</th><th>状态</th><th>操作</th></tr></thead>
                   <tbody>
