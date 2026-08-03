@@ -1026,8 +1026,10 @@ function AdminShell() {
   const [admins, setAdmins] = useState([])
   const [users, setUsers] = useState([])
   const [invites, setInvites] = useState([])
+  const [feedbacks, setFeedbacks] = useState([])
   const [siteContentForm, setSiteContentForm] = useState(createDefaultSiteContent)
   const [statusFilter, setStatusFilter] = useState('all')
+  const [feedbackStatusFilter, setFeedbackStatusFilter] = useState('all')
   const [userSearch, setUserSearch] = useState('')
   const [productSearch, setProductSearch] = useState('')
   const [inviteForm, setInviteForm] = useState({ count: 1, note: '', assigned_to: '' })
@@ -1081,6 +1083,11 @@ function AdminShell() {
     setInvites(data)
   }
 
+  const loadFeedbacks = async () => {
+    const { data } = await api.get('/admin/feedbacks', { params: { status: feedbackStatusFilter } })
+    setFeedbacks(data)
+  }
+
   const loadSiteContent = async () => {
     const { data } = await api.get('/admin/site-content')
     setSiteContentForm({ ...createDefaultSiteContent(), ...data })
@@ -1102,11 +1109,12 @@ function AdminShell() {
     if (section === 'admins') loadAdmins().catch(() => toast.error('加载管理员失败'))
     if (section === 'users') loadUsers().catch(() => toast.error('加载用户失败'))
     if (section === 'invites') loadInvites().catch(() => toast.error('加载邀请码失败'))
+    if (section === 'feedbacks') loadFeedbacks().catch(() => toast.error('加载反馈失败'))
     if (section === 'content') {
       loadSiteContent().catch(() => toast.error('加载页面内容失败'))
       loadProducts().catch(() => toast.error('加载商品失败'))
     }
-  }, [section, statusFilter, tokenReady])
+  }, [section, statusFilter, feedbackStatusFilter, tokenReady])
 
   useEffect(() => {
     if (!tokenReady) return
@@ -1115,7 +1123,7 @@ function AdminShell() {
 
   useEffect(() => {
     const path = location.pathname.split('/').at(-1)
-    if (['orders', 'products', 'users', 'invites', 'admins', 'content'].includes(path)) setSection(path)
+    if (['orders', 'products', 'users', 'invites', 'feedbacks', 'admins', 'content'].includes(path)) setSection(path)
   }, [location.pathname])
 
   if (!tokenReady) return null
@@ -1309,6 +1317,12 @@ function AdminShell() {
     loadInvites()
   }
 
+  const updateFeedbackStatus = async (feedback, nextStatus) => {
+    await api.put(`/admin/feedbacks/${feedback.id}/status`, { status: nextStatus })
+    toast.success(nextStatus === 'processed' ? '反馈已标记为已处理' : '反馈已改回未处理')
+    loadFeedbacks()
+  }
+
   return (
     <Shell
       title="后台管理面板"
@@ -1320,6 +1334,7 @@ function AdminShell() {
           <button className={section === 'products' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/products')}>商品管理</button>
           <button className={section === 'users' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/users')}>用户管理</button>
           <button className={section === 'invites' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/invites')}>邀请码管理</button>
+          <button className={section === 'feedbacks' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/feedbacks')}>反馈管理</button>
           <button className={section === 'content' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/content')}>内容管理</button>
           <button className={section === 'admins' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/admins')}>管理员管理</button>
         </aside>
@@ -1587,6 +1602,49 @@ function AdminShell() {
                         <td className="row-actions">
                           <CopyButton value={invite.code} label="复制邀请码" />
                           {!invite.is_used && <button onClick={() => setInviteEditModal({ open: true, invite, note: invite.note || '', assigned_to: invite.assigned_to || '' })}>编辑分发</button>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
+
+          {section === 'feedbacks' && (
+            <section className="panel">
+              <div className="section-toolbar wrap">
+                <div>
+                  <h3>反馈管理</h3>
+                  <p className="muted">查看玩家提交的商品、订单和页面建议，并标记处理状态。</p>
+                </div>
+                <select value={feedbackStatusFilter} onChange={(e) => setFeedbackStatusFilter(e.target.value)}>
+                  <option value="all">全部反馈</option>
+                  <option value="pending">未处理</option>
+                  <option value="processed">已处理</option>
+                </select>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead><tr><th>ID</th><th>提交时间</th><th>账号名</th><th>联系方式</th><th>内容</th><th>状态</th><th>操作</th></tr></thead>
+                  <tbody>
+                    {feedbacks.map((item) => (
+                      <tr key={item.id}>
+                        <td>{item.id}</td>
+                        <td>{formatTime(item.created_at)}</td>
+                        <td>{item.username || '-'}</td>
+                        <td>{item.contact || '-'}</td>
+                        <td className="feedback-message-cell">{item.message}</td>
+                        <td>
+                          <div className="user-status-cell">
+                            <span className={`status-pill ${item.status === 'processed' ? 'badge-success' : 'badge-warning'}`}>{item.status === 'processed' ? '已处理' : '未处理'}</span>
+                            {item.status === 'processed' && <span className="muted tiny-text">{item.processed_by_admin || '-'} · {formatTime(item.processed_at)}</span>}
+                          </div>
+                        </td>
+                        <td className="row-actions">
+                          {item.status === 'processed'
+                            ? <button onClick={() => updateFeedbackStatus(item, 'pending')}>改回未处理</button>
+                            : <button onClick={() => updateFeedbackStatus(item, 'processed')}>标记已处理</button>}
                         </td>
                       </tr>
                     ))}

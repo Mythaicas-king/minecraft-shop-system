@@ -290,6 +290,7 @@ button { cursor: pointer; }
 table { width: 100%; border-collapse: collapse; }
 th, td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
 .row-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.feedback-message-cell { min-width: 280px; max-width: 520px; white-space: pre-wrap; word-break: break-word; }
 .thumb { width: 52px; height: 52px; border-radius: 12px; }
 .split-panel { display: grid; grid-template-columns: .9fr 1.1fr; gap: 16px; }
 .product-management-panel { align-items: start; }

@@ -371,6 +371,20 @@ function normalizeInvite(row) {
   }
 }
 
+function normalizeFeedback(row) {
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    username: row.username,
+    contact: row.contact,
+    message: row.message,
+    status: row.status,
+    processed_at: row.processed_at,
+    processed_by_admin: row.processed_by_admin,
+    created_at: row.created_at,
+  }
+}
+
 async function initDatabase() {
   await query(`
     CREATE TABLE IF NOT EXISTS admins (
@@ -466,9 +480,15 @@ async function initDatabase() {
       username TEXT,
       contact TEXT NOT NULL DEFAULT '',
       message TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processed')),
+      processed_at TIMESTAMPTZ,
+      processed_by_admin TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `)
+  await query("ALTER TABLE feedbacks ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending'")
+  await query('ALTER TABLE feedbacks ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ')
+  await query('ALTER TABLE feedbacks ADD COLUMN IF NOT EXISTS processed_by_admin TEXT')
 }
 
 async function ensureSeedData() {
@@ -558,6 +578,40 @@ app.post('/api/feedback', userAuthOptional, async (req, res) => {
     res.status(201).json({ message: '反馈已提交，感谢你的建议' })
   } catch {
     res.status(500).json({ message: '提交反馈失败' })
+  }
+})
+
+app.get('/api/admin/feedbacks', authRequired, async (req, res) => {
+  try {
+    const status = String(req.query.status || 'all').trim()
+    const rows = status === 'all'
+      ? await getRows('SELECT * FROM feedbacks ORDER BY created_at DESC, id DESC')
+      : await getRows('SELECT * FROM feedbacks WHERE status = $1 ORDER BY created_at DESC, id DESC', [status])
+    res.json(rows.map(normalizeFeedback))
+  } catch {
+    res.status(500).json({ message: '获取反馈失败' })
+  }
+})
+
+app.put('/api/admin/feedbacks/:id/status', authRequired, async (req, res) => {
+  try {
+    const { id } = req.params
+    const { status } = req.body || {}
+    if (!['pending', 'processed'].includes(status)) return res.status(400).json({ message: '反馈状态无效' })
+    const updated = await getRow(
+      `UPDATE feedbacks
+       SET status = $1,
+           processed_at = CASE WHEN $1 = 'processed' THEN NOW() ELSE NULL END,
+           processed_by_admin = CASE WHEN $1 = 'processed' THEN $2 ELSE NULL END
+       WHERE id = $3
+       RETURNING *`,
+      [status, req.admin.username, id],
+    )
+    if (!updated) return res.status(404).json({ message: '反馈不存在' })
+    await logAction('feedback_status_updated', { id, status, admin: req.admin.username })
+    res.json(normalizeFeedback(updated))
+  } catch {
+    res.status(500).json({ message: '更新反馈状态失败' })
   }
 })
 
