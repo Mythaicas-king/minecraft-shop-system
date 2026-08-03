@@ -30,6 +30,17 @@ const S3_FORCE_PATH_STYLE = process.env.S3_FORCE_PATH_STYLE === 'true'
 const ORDER_SUBMIT_COOLDOWN_MS = Number(process.env.ORDER_SUBMIT_COOLDOWN_MS || 30000)
 const CAPTCHA_TTL_SECONDS = Number(process.env.CAPTCHA_TTL_SECONDS || 300)
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+const ADMIN_ROLES = {
+  super_admin: 'super_admin',
+  operations_admin: 'operations_admin',
+  order_admin: 'order_admin',
+}
+
+const ADMIN_PERMISSION_MAP = {
+  [ADMIN_ROLES.super_admin]: ['all'],
+  [ADMIN_ROLES.operations_admin]: ['products', 'users', 'merchants', 'invites', 'feedbacks', 'announcements', 'payouts', 'content'],
+  [ADMIN_ROLES.order_admin]: ['orders'],
+}
 
 const orderSubmitCooldowns = new Map()
 
@@ -113,8 +124,8 @@ function defaultSiteContent() {
       { title: '人工发货', text: '管理员后台审核订单并填写发放指令，适合各类生存与 RPG 服务器。' },
       { title: '状态可追踪', text: '玩家随时使用订单号或 API Key 查询发货进度与备注。' },
     ],
-    recharge_bonus_minimum: 100,
-    recharge_bonus_amount: 10,
+    recharge_bonus_minimum: 0,
+    recharge_bonus_amount: 0,
     recharge_notice: '复制报价指令后，请添加管理员并发送支付截图，等待管理员为会员卡入账。',
   }
 }
@@ -233,7 +244,7 @@ function generateApiKey() {
 }
 
 function createAdminToken(admin) {
-  return jwt.sign({ role: 'admin', id: admin.id, username: admin.username }, JWT_SECRET, { expiresIn: '12h' })
+  return jwt.sign({ role: 'admin', id: admin.id, username: admin.username, admin_role: admin.admin_role || ADMIN_ROLES.operations_admin }, JWT_SECRET, { expiresIn: '12h' })
 }
 
 function createUserToken(user) {
@@ -279,13 +290,40 @@ function getBearerToken(req) {
 function authRequired(req, res, next) {
   const token = getBearerToken(req)
   if (!token) return res.status(401).json({ message: '未登录或Token缺失' })
-  try {
-    const payload = jwt.verify(token, JWT_SECRET)
-    if (payload.role !== 'admin') return res.status(401).json({ message: '管理员Token无效' })
-    req.admin = payload
-    return next()
-  } catch {
-    return res.status(401).json({ message: 'Token无效或已过期' })
+  ;(async () => {
+    try {
+      const payload = jwt.verify(token, JWT_SECRET)
+      if (payload.role !== 'admin') return res.status(401).json({ message: '管理员Token无效' })
+      const admin = await getRow('SELECT id, username, admin_role, created_at FROM admins WHERE id = $1', [payload.id])
+      if (!admin) return res.status(401).json({ message: '管理员不存在或登录已失效' })
+      req.admin = {
+        id: admin.id,
+        username: admin.username,
+        admin_role: admin.admin_role || ADMIN_ROLES.operations_admin,
+        created_at: admin.created_at,
+      }
+      return next()
+    } catch {
+      return res.status(401).json({ message: 'Token无效或已过期' })
+    }
+  })()
+}
+
+function isRootAdmin(admin) {
+  return String(admin?.username || '').trim().toLowerCase() === 'admin'
+}
+
+function rootAdminRequired(req, res, next) {
+  if (!isRootAdmin(req.admin)) return res.status(403).json({ message: '只有主管理员 admin 可以管理管理员账号' })
+  return next()
+}
+
+function adminPermissionRequired(permission) {
+  return (req, res, next) => {
+    const role = req.admin?.admin_role || ADMIN_ROLES.operations_admin
+    const permissions = ADMIN_PERMISSION_MAP[role] || []
+    if (permissions.includes('all') || permissions.includes(permission)) return next()
+    return res.status(403).json({ message: '你没有权限访问该后台模块' })
   }
 }
 
@@ -525,10 +563,12 @@ async function initDatabase() {
     CREATE TABLE IF NOT EXISTS admins (
       id SERIAL PRIMARY KEY,
       username TEXT UNIQUE NOT NULL,
+      admin_role TEXT NOT NULL DEFAULT 'operations_admin',
       password_hash TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `)
+  await query("ALTER TABLE admins ADD COLUMN IF NOT EXISTS admin_role TEXT NOT NULL DEFAULT 'operations_admin'")
   await query(`
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
@@ -703,13 +743,16 @@ async function initDatabase() {
 }
 
 async function ensureSeedData() {
-  let admin = await getRow('SELECT id, username FROM admins LIMIT 1')
+  let admin = await getRow('SELECT id, username, admin_role FROM admins LIMIT 1')
   if (!admin) {
     const hash = await bcrypt.hash('admin123', 10)
-    await query('INSERT INTO admins (username, password_hash) VALUES ($1, $2)', ['admin', hash])
+    await query('INSERT INTO admins (username, admin_role, password_hash) VALUES ($1, $2, $3)', ['admin', ADMIN_ROLES.super_admin, hash])
     console.log('Created default admin account: admin / admin123. Please change the password after first login.')
     await logAction('default_admin_created', { username: 'admin' })
-    admin = await getRow('SELECT id, username FROM admins WHERE username = $1', ['admin'])
+    admin = await getRow('SELECT id, username, admin_role FROM admins WHERE username = $1', ['admin'])
+  } else if (String(admin.username).trim().toLowerCase() === 'admin' && admin.admin_role !== ADMIN_ROLES.super_admin) {
+    await query('UPDATE admins SET admin_role = $1 WHERE username = $2', [ADMIN_ROLES.super_admin, 'admin'])
+    admin.admin_role = ADMIN_ROLES.super_admin
   }
 
   const productCount = await getRow('SELECT COUNT(*)::int AS count FROM products')
@@ -871,7 +914,7 @@ app.post('/api/feedback', userAuthOptional, async (req, res) => {
   }
 })
 
-app.get('/api/admin/feedbacks', authRequired, async (req, res) => {
+app.get('/api/admin/feedbacks', authRequired, adminPermissionRequired('feedbacks'), async (req, res) => {
   try {
     const status = String(req.query.status || 'all').trim()
     const rows = status === 'all'
@@ -883,7 +926,7 @@ app.get('/api/admin/feedbacks', authRequired, async (req, res) => {
   }
 })
 
-app.put('/api/admin/feedbacks/:id/status', authRequired, async (req, res) => {
+app.put('/api/admin/feedbacks/:id/status', authRequired, adminPermissionRequired('feedbacks'), async (req, res) => {
   try {
     const { id } = req.params
     const { status } = req.body || {}
@@ -1178,7 +1221,7 @@ app.post('/api/merchant/payout-requests', merchantRequired, async (req, res) => 
   }
 })
 
-app.post('/api/admin/uploads', authRequired, upload.single('image'), async (req, res) => {
+app.post('/api/admin/uploads', authRequired, adminPermissionRequired('products'), upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: '未上传文件' })
     const uploaded = await persistUpload(req.file)
@@ -1410,13 +1453,13 @@ app.post('/api/admin/login', async (req, res) => {
     }
     const token = createAdminToken(admin)
     await logAction('admin_login_success', { username })
-    res.json({ token, admin: { id: admin.id, username: admin.username } })
+    res.json({ token, admin: { id: admin.id, username: admin.username, admin_role: admin.admin_role || ADMIN_ROLES.operations_admin } })
   } catch {
     res.status(500).json({ message: '登录失败' })
   }
 })
 
-app.get('/api/admin/site-content', authRequired, async (req, res) => {
+app.get('/api/admin/site-content', authRequired, adminPermissionRequired('content'), async (req, res) => {
   try {
     res.json(await getSiteContent())
   } catch {
@@ -1424,7 +1467,7 @@ app.get('/api/admin/site-content', authRequired, async (req, res) => {
   }
 })
 
-app.put('/api/admin/site-content', authRequired, async (req, res) => {
+app.put('/api/admin/site-content', authRequired, adminPermissionRequired('content'), async (req, res) => {
   try {
     const nextContent = {
       ...defaultSiteContent(),
@@ -1460,7 +1503,7 @@ app.put('/api/admin/site-content', authRequired, async (req, res) => {
   }
 })
 
-app.get('/api/admin/orders', authRequired, async (req, res) => {
+app.get('/api/admin/orders', authRequired, adminPermissionRequired('orders'), async (req, res) => {
   try {
     const { status = 'all' } = req.query
     const rows = status !== 'all'
@@ -1472,7 +1515,7 @@ app.get('/api/admin/orders', authRequired, async (req, res) => {
   }
 })
 
-app.put('/api/admin/orders/:orderNo/ship', authRequired, async (req, res) => {
+app.put('/api/admin/orders/:orderNo/ship', authRequired, adminPermissionRequired('orders'), async (req, res) => {
   try {
     const { orderNo } = req.params
     const { shipping_instruction } = req.body || {}
@@ -1512,7 +1555,7 @@ app.put('/api/admin/orders/:orderNo/ship', authRequired, async (req, res) => {
   }
 })
 
-app.put('/api/admin/orders/:orderNo/cancel', authRequired, async (req, res) => {
+app.put('/api/admin/orders/:orderNo/cancel', authRequired, adminPermissionRequired('orders'), async (req, res) => {
   try {
     const { orderNo } = req.params
     const order = await getRow('SELECT * FROM orders WHERE order_number = $1', [orderNo])
@@ -1531,7 +1574,7 @@ app.put('/api/admin/orders/:orderNo/cancel', authRequired, async (req, res) => {
   }
 })
 
-app.get('/api/admin/products', authRequired, async (req, res) => {
+app.get('/api/admin/products', authRequired, adminPermissionRequired('products'), async (req, res) => {
   try {
     const rows = await getRows('SELECT * FROM products ORDER BY id DESC')
     const normalized = rows.map(normalizeProduct)
@@ -1545,7 +1588,7 @@ app.get('/api/admin/products', authRequired, async (req, res) => {
   }
 })
 
-app.post('/api/admin/products', authRequired, async (req, res) => {
+app.post('/api/admin/products', authRequired, adminPermissionRequired('products'), async (req, res) => {
   try {
     const { name, description, price, category = '热门补给', image_url, stock_quantity, is_active = true } = req.body || {}
     const normalizedStock = parseNonNegativeInt(stock_quantity)
@@ -1573,7 +1616,7 @@ app.post('/api/admin/products', authRequired, async (req, res) => {
   }
 })
 
-app.put('/api/admin/products/:id', authRequired, async (req, res) => {
+app.put('/api/admin/products/:id', authRequired, adminPermissionRequired('products'), async (req, res) => {
   try {
     const { id } = req.params
     const { name, description, price, category, image_url, stock_quantity, is_active } = req.body || {}
@@ -1606,7 +1649,7 @@ app.put('/api/admin/products/:id', authRequired, async (req, res) => {
   }
 })
 
-app.delete('/api/admin/products/:id', authRequired, async (req, res) => {
+app.delete('/api/admin/products/:id', authRequired, adminPermissionRequired('products'), async (req, res) => {
   try {
     const { id } = req.params
     await query('DELETE FROM products WHERE id = $1', [id])
@@ -1617,16 +1660,16 @@ app.delete('/api/admin/products/:id', authRequired, async (req, res) => {
   }
 })
 
-app.get('/api/admin/admins', authRequired, async (req, res) => {
+app.get('/api/admin/admins', authRequired, rootAdminRequired, async (req, res) => {
   try {
-    const rows = await getRows('SELECT id, username, created_at FROM admins ORDER BY id ASC')
+    const rows = await getRows('SELECT id, username, admin_role, created_at FROM admins ORDER BY id ASC')
     res.json(rows)
   } catch {
     res.status(500).json({ message: '获取管理员失败' })
   }
 })
 
-app.get('/api/admin/users', authRequired, async (req, res) => {
+app.get('/api/admin/users', authRequired, adminPermissionRequired('users'), async (req, res) => {
   try {
     const search = String(req.query.search || '').trim()
     const rows = search
@@ -1653,7 +1696,7 @@ app.get('/api/admin/users', authRequired, async (req, res) => {
   }
 })
 
-app.put('/api/admin/users/:id/ban', authRequired, async (req, res) => {
+app.put('/api/admin/users/:id/ban', authRequired, adminPermissionRequired('users'), async (req, res) => {
   try {
     const { id } = req.params
     const { is_banned, banned_reason = '' } = req.body || {}
@@ -1679,7 +1722,7 @@ app.put('/api/admin/users/:id/ban', authRequired, async (req, res) => {
   }
 })
 
-app.put('/api/admin/users/:id/member', authRequired, async (req, res) => {
+app.put('/api/admin/users/:id/member', authRequired, adminPermissionRequired('users'), async (req, res) => {
   try {
     const { id } = req.params
     const { member_tier, balance_delta = 0, recharge_delta = 0, note = '' } = req.body || {}
@@ -1752,7 +1795,7 @@ app.put('/api/admin/users/:id/member', authRequired, async (req, res) => {
   }
 })
 
-app.put('/api/admin/users/:id/merchant', authRequired, async (req, res) => {
+app.put('/api/admin/users/:id/merchant', authRequired, adminPermissionRequired('users'), async (req, res) => {
   try {
     const { id } = req.params
     const { is_merchant, store_name = '' } = req.body || {}
@@ -1792,7 +1835,7 @@ app.put('/api/admin/users/:id/merchant', authRequired, async (req, res) => {
   }
 })
 
-app.get('/api/admin/announcements', authRequired, async (req, res) => {
+app.get('/api/admin/announcements', authRequired, adminPermissionRequired('announcements'), async (req, res) => {
   try {
     const rows = await getRows('SELECT * FROM announcements ORDER BY is_pinned DESC, updated_at DESC, id DESC')
     res.json(rows)
@@ -1801,7 +1844,7 @@ app.get('/api/admin/announcements', authRequired, async (req, res) => {
   }
 })
 
-app.post('/api/admin/announcements', authRequired, async (req, res) => {
+app.post('/api/admin/announcements', authRequired, adminPermissionRequired('announcements'), async (req, res) => {
   try {
     const { title, content, is_pinned = false } = req.body || {}
     if (!title || !content) return res.status(400).json({ message: '公告标题和内容不能为空' })
@@ -1818,7 +1861,7 @@ app.post('/api/admin/announcements', authRequired, async (req, res) => {
   }
 })
 
-app.put('/api/admin/announcements/:id', authRequired, async (req, res) => {
+app.put('/api/admin/announcements/:id', authRequired, adminPermissionRequired('announcements'), async (req, res) => {
   try {
     const { id } = req.params
     const { title, content, is_pinned } = req.body || {}
@@ -1843,7 +1886,7 @@ app.put('/api/admin/announcements/:id', authRequired, async (req, res) => {
   }
 })
 
-app.delete('/api/admin/announcements/:id', authRequired, async (req, res) => {
+app.delete('/api/admin/announcements/:id', authRequired, adminPermissionRequired('announcements'), async (req, res) => {
   try {
     const { id } = req.params
     await query('DELETE FROM announcements WHERE id = $1', [id])
@@ -1854,7 +1897,7 @@ app.delete('/api/admin/announcements/:id', authRequired, async (req, res) => {
   }
 })
 
-app.get('/api/admin/payout-requests', authRequired, async (req, res) => {
+app.get('/api/admin/payout-requests', authRequired, adminPermissionRequired('payouts'), async (req, res) => {
   try {
     const rows = await getRows('SELECT * FROM payout_requests ORDER BY requested_at DESC, id DESC')
     res.json(rows.map(normalizePayoutRequest))
@@ -1863,7 +1906,7 @@ app.get('/api/admin/payout-requests', authRequired, async (req, res) => {
   }
 })
 
-app.get('/api/admin/merchant-overview', authRequired, async (req, res) => {
+app.get('/api/admin/merchant-overview', authRequired, adminPermissionRequired('merchants'), async (req, res) => {
   try {
     const merchants = await getRows('SELECT * FROM users WHERE is_merchant = TRUE ORDER BY id DESC')
     const orders = await getRows('SELECT * FROM orders WHERE merchant_user_id IS NOT NULL ORDER BY created_at DESC, id DESC')
@@ -1884,7 +1927,7 @@ app.get('/api/admin/merchant-overview', authRequired, async (req, res) => {
   }
 })
 
-app.put('/api/admin/payout-requests/:id/status', authRequired, async (req, res) => {
+app.put('/api/admin/payout-requests/:id/status', authRequired, adminPermissionRequired('payouts'), async (req, res) => {
   try {
     const { id } = req.params
     const status = String(req.body?.status || '').trim()
@@ -1936,7 +1979,7 @@ app.put('/api/admin/payout-requests/:id/status', authRequired, async (req, res) 
   }
 })
 
-app.get('/api/admin/invites', authRequired, async (req, res) => {
+app.get('/api/admin/invites', authRequired, adminPermissionRequired('invites'), async (req, res) => {
   try {
     const rows = await getRows(
       `SELECT ic.*, a.username AS created_by_admin_username, u.username AS used_by_username
@@ -1951,7 +1994,7 @@ app.get('/api/admin/invites', authRequired, async (req, res) => {
   }
 })
 
-app.post('/api/admin/invites', authRequired, async (req, res) => {
+app.post('/api/admin/invites', authRequired, adminPermissionRequired('invites'), async (req, res) => {
   try {
     const count = Math.min(Math.max(Number(req.body?.count || 1), 1), 50)
     const note = String(req.body?.note || '').trim()
@@ -1981,7 +2024,7 @@ app.post('/api/admin/invites', authRequired, async (req, res) => {
   }
 })
 
-app.put('/api/admin/invites/:id', authRequired, async (req, res) => {
+app.put('/api/admin/invites/:id', authRequired, adminPermissionRequired('invites'), async (req, res) => {
   try {
     const { id } = req.params
     const invite = await getRow('SELECT * FROM invite_codes WHERE id = $1', [id])
@@ -2005,16 +2048,19 @@ app.put('/api/admin/invites/:id', authRequired, async (req, res) => {
   }
 })
 
-app.post('/api/admin/admins', authRequired, async (req, res) => {
+app.post('/api/admin/admins', authRequired, rootAdminRequired, async (req, res) => {
   try {
-    const { username, password } = req.body || {}
+    const { username, password, admin_role = ADMIN_ROLES.operations_admin } = req.body || {}
     if (!username || !password) return res.status(400).json({ message: '用户名和密码不能为空' })
+    if (!Object.values(ADMIN_ROLES).includes(admin_role) || admin_role === ADMIN_ROLES.super_admin) {
+      return res.status(400).json({ message: '管理员角色无效' })
+    }
     const exists = await getRow('SELECT 1 FROM admins WHERE username = $1', [username])
     if (exists) return res.status(400).json({ message: '用户名已存在' })
     const hash = await bcrypt.hash(password, 10)
     const created = await getRow(
-      'INSERT INTO admins (username, password_hash) VALUES ($1, $2) RETURNING id, username, created_at',
-      [String(username).trim(), hash],
+      'INSERT INTO admins (username, admin_role, password_hash) VALUES ($1, $2, $3) RETURNING id, username, admin_role, created_at',
+      [String(username).trim(), admin_role, hash],
     )
     await logAction('admin_created', { id: created.id, admin: req.admin.username })
     res.status(201).json(created)
@@ -2023,14 +2069,16 @@ app.post('/api/admin/admins', authRequired, async (req, res) => {
   }
 })
 
-app.delete('/api/admin/admins/:id', authRequired, async (req, res) => {
+app.delete('/api/admin/admins/:id', authRequired, rootAdminRequired, async (req, res) => {
   try {
     const { id } = req.params
+    const target = await getRow('SELECT id, username FROM admins WHERE id = $1', [id])
+    if (!target) return res.status(404).json({ message: '管理员不存在' })
+    if (isRootAdmin(target)) return res.status(400).json({ message: '不能删除主管理员 admin' })
     const count = await getRow('SELECT COUNT(*)::int AS count FROM admins')
     if (count.count <= 1) return res.status(400).json({ message: '不能删除最后一个管理员' })
     if (Number(id) === Number(req.admin.id)) return res.status(400).json({ message: '不能删除当前登录管理员' })
     const deleted = await getRow('DELETE FROM admins WHERE id = $1 RETURNING id', [id])
-    if (!deleted) return res.status(404).json({ message: '管理员不存在' })
     await logAction('admin_deleted', { id, admin: req.admin.username })
     res.json({ message: '管理员已删除' })
   } catch {
@@ -2038,14 +2086,18 @@ app.delete('/api/admin/admins/:id', authRequired, async (req, res) => {
   }
 })
 
-app.put('/api/admin/admins/:id/password', authRequired, async (req, res) => {
+app.put('/api/admin/admins/:id/password', authRequired, rootAdminRequired, async (req, res) => {
   try {
     const { id } = req.params
     const { password } = req.body || {}
     if (!password) return res.status(400).json({ message: '密码不能为空' })
+    const target = await getRow('SELECT id, username FROM admins WHERE id = $1', [id])
+    if (!target) return res.status(404).json({ message: '管理员不存在' })
+    if (isRootAdmin(target) && Number(target.id) !== Number(req.admin.id)) {
+      return res.status(400).json({ message: '不能修改主管理员 admin 的密码' })
+    }
     const hash = await bcrypt.hash(password, 10)
     const updated = await getRow('UPDATE admins SET password_hash = $1 WHERE id = $2 RETURNING id', [hash, id])
-    if (!updated) return res.status(404).json({ message: '管理员不存在' })
     await logAction('admin_password_changed', { id, admin: req.admin.username })
     res.json({ message: '密码已更新' })
   } catch {

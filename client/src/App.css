@@ -321,6 +321,7 @@ button { cursor: pointer; }
 .search-inline { align-items: center; width: min(100%, 420px); }
 .wide-search-inline { width: min(100%, 560px); }
 .search-inline input { min-width: 220px; }
+.search-inline select { min-width: 140px; }
 .feature-editor-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
 .feature-editor-card {
   padding: 14px;

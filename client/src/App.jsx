@@ -18,6 +18,7 @@ const emptyAdminForm = {
   username: '',
   password: '',
   confirmPassword: '',
+  admin_role: 'operations_admin',
 }
 
 const emptyUserAuthForm = {
@@ -55,6 +56,18 @@ const storeCreditMeta = {
   credited: { text: '已入账', className: 'badge-success' },
 }
 
+const adminRoleLabels = {
+  super_admin: '主管理员',
+  operations_admin: '运营管理员',
+  order_admin: '订单管理员',
+}
+
+const adminRoleSectionMap = {
+  super_admin: ['orders', 'products', 'users', 'merchants', 'invites', 'feedbacks', 'announcements', 'payouts', 'content', 'admins'],
+  operations_admin: ['products', 'users', 'merchants', 'invites', 'feedbacks', 'announcements', 'payouts', 'content'],
+  order_admin: ['orders'],
+}
+
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 const ANNOUNCEMENT_PREVIEW_LENGTH = 140
 
@@ -68,6 +81,7 @@ function buildRechargeCommand(amount) {
 }
 
 function getRechargeBonusAmount(amount, bonusMin = 100, bonusAmount = 10) {
+  if (bonusMin <= 0 || bonusAmount <= 0) return 0
   if (amount >= bonusMin) return Math.floor(amount / bonusMin) * bonusAmount
   return 0
 }
@@ -174,8 +188,8 @@ function createDefaultSiteContent() {
       { title: '人工发货', text: '管理员后台审核订单并填写发放指令，适合各类生存与 RPG 服务器。' },
       { title: '状态可追踪', text: '玩家随时使用订单号或 API Key 查询发货进度与备注。' },
     ],
-    recharge_bonus_minimum: 100,
-    recharge_bonus_amount: 10,
+    recharge_bonus_minimum: 0,
+    recharge_bonus_amount: 0,
     recharge_notice: '复制报价指令后，请联系管理员并发送支付截图，等待会员卡入账。',
   }
 }
@@ -1775,7 +1789,10 @@ function RechargePage() {
   }, [])
 
   const rechargeAmount = Math.max(0, Number(amount) || 0)
-  const bonusAmount = getRechargeBonusAmount(rechargeAmount, Number(siteContent.recharge_bonus_minimum || 100), Number(siteContent.recharge_bonus_amount || 10))
+  const bonusMin = Number(siteContent.recharge_bonus_minimum || 0)
+  const bonusPerTier = Number(siteContent.recharge_bonus_amount || 0)
+  const hasRechargeBonus = bonusMin > 0 && bonusPerTier > 0
+  const bonusAmount = getRechargeBonusAmount(rechargeAmount, bonusMin, bonusPerTier)
   const command = buildRechargeCommand(rechargeAmount)
 
   return (
@@ -1786,7 +1803,7 @@ function RechargePage() {
           <h2>充值会员卡余额</h2>
           <p className="muted">输入充值金额后，会自动生成支付报价指令。复制后在游戏内执行，并把截图发给管理员处理。</p>
           <div className="summary-card">
-            <p><strong>当前优惠：</strong>满 {siteContent.recharge_bonus_minimum || 100} 送 {siteContent.recharge_bonus_amount || 10}</p>
+            <p><strong>当前优惠：</strong>{hasRechargeBonus ? `满 ${bonusMin} 送 ${bonusPerTier}` : '当前未开启满赠活动'}</p>
             <p><strong>预计到账：</strong>{rechargeAmount + bonusAmount} 金币</p>
           </div>
           <p className="account-banner">{siteContent.recharge_notice}</p>
@@ -1914,7 +1931,7 @@ function AdminShell() {
   const [shipTarget, setShipTarget] = useState(null)
   const [shippingInstruction, setShippingInstruction] = useState('')
   const [confirmAction, setConfirmAction] = useState(null)
-  const [adminForm, setAdminForm] = useState(emptyAdminForm)
+  const [adminForm, setAdminForm] = useState({ ...emptyAdminForm, admin_role: 'operations_admin' })
   const [adminModalOpen, setAdminModalOpen] = useState(false)
   const [passwordModal, setPasswordModal] = useState({ open: false, id: null, password: '', confirmPassword: '' })
   const [banModal, setBanModal] = useState({ open: false, user: null, reason: '', nextStatus: true })
@@ -1923,6 +1940,9 @@ function AdminShell() {
   const [merchantModal, setMerchantModal] = useState({ open: false, user: null, is_merchant: false, store_name: '' })
   const [payoutStatusFilter, setPayoutStatusFilter] = useState('all')
   const [merchantSearch, setMerchantSearch] = useState('')
+  const adminRole = admin?.admin_role || (admin?.username === 'admin' ? 'super_admin' : 'operations_admin')
+  const isRootAdmin = admin?.username === 'admin'
+  const allowedSections = adminRoleSectionMap[adminRole] || []
 
   useEffect(() => {
     const token = localStorage.getItem('ms_token')
@@ -2030,7 +2050,7 @@ function AdminShell() {
     if (!tokenReady) return
     if (section === 'orders') loadOrders().catch(() => toast.error('加载订单失败'))
     if (section === 'products') loadProducts().catch(() => toast.error('加载商品失败'))
-    if (section === 'admins') loadAdmins().catch(() => toast.error('加载管理员失败'))
+    if (section === 'admins' && isRootAdmin) loadAdmins().catch(() => toast.error('加载管理员失败'))
     if (section === 'users') loadUsers().catch(() => toast.error('加载用户失败'))
     if (section === 'invites') loadInvites().catch(() => toast.error('加载邀请码失败'))
     if (section === 'feedbacks') loadFeedbacks().catch(() => toast.error('加载反馈失败'))
@@ -2041,7 +2061,7 @@ function AdminShell() {
       loadSiteContent().catch(() => toast.error('加载页面内容失败'))
       loadProducts().catch(() => toast.error('加载商品失败'))
     }
-  }, [section, statusFilter, feedbackStatusFilter, tokenReady])
+  }, [section, statusFilter, feedbackStatusFilter, tokenReady, isRootAdmin])
 
   useEffect(() => {
     if (!tokenReady) return
@@ -2052,6 +2072,13 @@ function AdminShell() {
     const path = location.pathname.split('/').at(-1)
     if (['orders', 'products', 'users', 'invites', 'feedbacks', 'announcements', 'admins', 'content', 'payouts', 'merchants'].includes(path)) setSection(path)
   }, [location.pathname])
+
+  useEffect(() => {
+    if (!tokenReady) return
+    if (!allowedSections.includes(section)) {
+      navigate(`/admin/${allowedSections[0] || 'orders'}`, { replace: true })
+    }
+  }, [section, isRootAdmin, navigate, tokenReady, allowedSections])
 
   if (!tokenReady) return null
 
@@ -2158,8 +2185,8 @@ function AdminShell() {
     e.preventDefault()
     const payload = {
       ...siteContentForm,
-      recharge_bonus_minimum: Number(siteContentForm.recharge_bonus_minimum || 100),
-      recharge_bonus_amount: Number(siteContentForm.recharge_bonus_amount || 10),
+      recharge_bonus_minimum: Math.max(0, Number(siteContentForm.recharge_bonus_minimum || 0)),
+      recharge_bonus_amount: Math.max(0, Number(siteContentForm.recharge_bonus_amount || 0)),
       announcements: siteContentForm.announcements.map((item) => item.trim()).filter(Boolean),
       features: siteContentForm.features
         .map((item) => ({ title: item.title.trim(), text: item.text.trim() }))
@@ -2180,7 +2207,7 @@ function AdminShell() {
       toast.error('两次密码输入不一致')
       return
     }
-    await api.post('/admin/admins', { username: adminForm.username.trim(), password: adminForm.password })
+    await api.post('/admin/admins', { username: adminForm.username.trim(), password: adminForm.password, admin_role: adminForm.admin_role })
     toast.success('管理员已添加')
     setAdminForm(emptyAdminForm)
     setAdminModalOpen(false)
@@ -2267,6 +2294,10 @@ function AdminShell() {
   const submitMerchantUpdate = async (event) => {
     event.preventDefault()
     if (!merchantModal.user) return
+    if (!merchantModal.is_merchant && merchantModal.user.is_merchant) {
+      const confirmed = window.confirm(`关闭商家权限会自动下架该店铺商品，并取消所有待处理订单且退款给买家。确认继续吗？`)
+      if (!confirmed) return
+    }
     await api.put(`/admin/users/${merchantModal.user.id}/merchant`, {
       is_merchant: merchantModal.is_merchant,
       store_name: merchantModal.store_name.trim(),
@@ -2324,20 +2355,20 @@ function AdminShell() {
   return (
     <Shell
       title="后台管理面板"
-      right={<><Link className="ghost-button" to="/">直达首页</Link><span className="muted">{admin?.username}</span><button className="ghost-button" onClick={logout}>登出</button></>}
+      right={<><Link className="ghost-button" to="/">直达首页</Link><span className="muted">{admin?.username} · {adminRoleLabels[adminRole] || '管理员'}</span><button className="ghost-button" onClick={logout}>登出</button></>}
     >
       <div className="admin-layout">
         <aside className="sidebar panel">
-          <button className={section === 'orders' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/orders')}>订单管理</button>
-          <button className={section === 'products' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/products')}>商品管理</button>
-          <button className={section === 'users' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/users')}>用户管理</button>
-          <button className={section === 'merchants' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/merchants')}>商家总览</button>
-          <button className={section === 'invites' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/invites')}>邀请码管理</button>
-          <button className={section === 'feedbacks' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/feedbacks')}>反馈管理</button>
-          <button className={section === 'announcements' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/announcements')}>公告管理</button>
-          <button className={section === 'payouts' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/payouts')}>提现审核</button>
-          <button className={section === 'content' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/content')}>内容管理</button>
-          <button className={section === 'admins' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/admins')}>管理员管理</button>
+          {allowedSections.includes('orders') && <button className={section === 'orders' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/orders')}>订单管理</button>}
+          {allowedSections.includes('products') && <button className={section === 'products' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/products')}>商品管理</button>}
+          {allowedSections.includes('users') && <button className={section === 'users' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/users')}>用户管理</button>}
+          {allowedSections.includes('merchants') && <button className={section === 'merchants' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/merchants')}>商家总览</button>}
+          {allowedSections.includes('invites') && <button className={section === 'invites' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/invites')}>邀请码管理</button>}
+          {allowedSections.includes('feedbacks') && <button className={section === 'feedbacks' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/feedbacks')}>反馈管理</button>}
+          {allowedSections.includes('announcements') && <button className={section === 'announcements' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/announcements')}>公告管理</button>}
+          {allowedSections.includes('payouts') && <button className={section === 'payouts' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/payouts')}>提现审核</button>}
+          {allowedSections.includes('content') && <button className={section === 'content' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/content')}>内容管理</button>}
+          {allowedSections.includes('admins') && <button className={section === 'admins' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/admins')}>管理员管理</button>}
         </aside>
         <main className="content-column">
           {section === 'orders' && (
@@ -2539,8 +2570,9 @@ function AdminShell() {
 
                 <div className="panel inset-panel">
                   <h4>会员充值设置</h4>
-                  <label>满额门槛<input type="number" value={siteContentForm.recharge_bonus_minimum || 100} onChange={(e) => setSiteContentForm((s) => ({ ...s, recharge_bonus_minimum: e.target.value }))} /></label>
-                  <label>赠送金额<input type="number" value={siteContentForm.recharge_bonus_amount || 10} onChange={(e) => setSiteContentForm((s) => ({ ...s, recharge_bonus_amount: e.target.value }))} /></label>
+                  <label>满赠门槛<input type="number" min="0" value={siteContentForm.recharge_bonus_minimum || 0} onChange={(e) => setSiteContentForm((s) => ({ ...s, recharge_bonus_minimum: e.target.value }))} /></label>
+                  <label>每档赠送金额<input type="number" min="0" value={siteContentForm.recharge_bonus_amount || 0} onChange={(e) => setSiteContentForm((s) => ({ ...s, recharge_bonus_amount: e.target.value }))} /></label>
+                  <p className="muted tiny-text">门槛或赠送金额填 0 即表示关闭满赠，管理员可随时自定义活动规则。</p>
                   <label>充值提示<textarea value={siteContentForm.recharge_notice || ''} onChange={(e) => setSiteContentForm((s) => ({ ...s, recharge_notice: e.target.value }))} /></label>
                 </div>
 
@@ -2579,18 +2611,19 @@ function AdminShell() {
               <div className="section-toolbar wrap">
                 <div>
                   <h3>管理员管理</h3>
-                  <p className="muted">添加管理员、修改密码，并保护最后一个管理员账号。</p>
+                  <p className="muted">只有主管理员可以添加管理员，并区分主管理员、运营管理员、订单管理员。</p>
                 </div>
                 <button className="primary-button" onClick={() => setAdminModalOpen(true)}>添加管理员</button>
               </div>
               <div className="table-wrap admin-table-wrap">
                 <table>
-                  <thead><tr><th>ID</th><th>用户名</th><th>创建时间</th><th>操作</th></tr></thead>
+                  <thead><tr><th>ID</th><th>用户名</th><th>角色</th><th>创建时间</th><th>操作</th></tr></thead>
                   <tbody>
                     {admins.map((item) => (
                       <tr key={item.id}>
                         <td>{item.id}</td>
                         <td>{item.username}</td>
+                        <td>{adminRoleLabels[item.admin_role] || item.admin_role}</td>
                         <td>{formatTime(item.created_at)}</td>
                         <td className="row-actions">
                           <button onClick={() => setPasswordModal({ open: true, id: item.id, password: '', confirmPassword: '' })}>修改密码</button>
@@ -2858,6 +2891,12 @@ function AdminShell() {
         <ModalFrame title="添加管理员" onClose={() => setAdminModalOpen(false)}>
           <form className="form-grid" onSubmit={submitAdmin}>
             <label>用户名<input value={adminForm.username} onChange={(e) => setAdminForm((s) => ({ ...s, username: e.target.value }))} /></label>
+            <label>管理员角色
+              <select value={adminForm.admin_role} onChange={(e) => setAdminForm((s) => ({ ...s, admin_role: e.target.value }))}>
+                <option value="operations_admin">运营管理员</option>
+                <option value="order_admin">订单管理员</option>
+              </select>
+            </label>
             <label>密码<input type="password" value={adminForm.password} onChange={(e) => setAdminForm((s) => ({ ...s, password: e.target.value }))} /></label>
             <label>确认密码<input type="password" value={adminForm.confirmPassword} onChange={(e) => setAdminForm((s) => ({ ...s, confirmPassword: e.target.value }))} /></label>
             <div className="button-group">
