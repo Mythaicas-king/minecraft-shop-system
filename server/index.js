@@ -131,7 +131,18 @@ function defaultSiteContent() {
 }
 
 function normalizeSiteContent(row) {
-  return row?.content || defaultSiteContent()
+  const normalized = {
+    ...defaultSiteContent(),
+    ...(row?.content || {}),
+  }
+
+  // Migrate the legacy default promo so old data stops forcing 100/10 after the rule change.
+  if (Number(normalized.recharge_bonus_minimum) === 100 && Number(normalized.recharge_bonus_amount) === 10) {
+    normalized.recharge_bonus_minimum = 0
+    normalized.recharge_bonus_amount = 0
+  }
+
+  return normalized
 }
 
 function getRequestIp(req) {
@@ -743,14 +754,14 @@ async function initDatabase() {
 }
 
 async function ensureSeedData() {
-  let admin = await getRow('SELECT id, username, admin_role FROM admins LIMIT 1')
+  let admin = await getRow('SELECT id, username, admin_role FROM admins WHERE username = $1', ['admin'])
   if (!admin) {
     const hash = await bcrypt.hash('admin123', 10)
     await query('INSERT INTO admins (username, admin_role, password_hash) VALUES ($1, $2, $3)', ['admin', ADMIN_ROLES.super_admin, hash])
     console.log('Created default admin account: admin / admin123. Please change the password after first login.')
     await logAction('default_admin_created', { username: 'admin' })
     admin = await getRow('SELECT id, username, admin_role FROM admins WHERE username = $1', ['admin'])
-  } else if (String(admin.username).trim().toLowerCase() === 'admin' && admin.admin_role !== ADMIN_ROLES.super_admin) {
+  } else if (admin.admin_role !== ADMIN_ROLES.super_admin) {
     await query('UPDATE admins SET admin_role = $1 WHERE username = $2', [ADMIN_ROLES.super_admin, 'admin'])
     admin.admin_role = ADMIN_ROLES.super_admin
   }
