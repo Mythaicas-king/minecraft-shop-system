@@ -37,6 +37,21 @@ const orderStatusLabels = {
   cancelled: { text: '已取消', className: 'badge-danger' },
 }
 
+const memberTierLabels = {
+  none: '普通会员',
+  iron: '铁锭会员',
+  gold: '黄金会员',
+}
+
+function formatMemberDiscount(rate = 1) {
+  if (rate >= 1) return '无折扣'
+  return `${Math.round(rate * 10)} 折`
+}
+
+function buildRechargeCommand(amount) {
+  return `/cmi pay Mythaicas ${amount}`
+}
+
 function createDefaultSiteContent() {
   return {
     hero_title: '方块世界补给中心',
@@ -67,6 +82,9 @@ function createDefaultSiteContent() {
       { title: '人工发货', text: '管理员后台审核订单并填写发放指令，适合各类生存与 RPG 服务器。' },
       { title: '状态可追踪', text: '玩家随时使用订单号或 API Key 查询发货进度与备注。' },
     ],
+    recharge_bonus_minimum: 100,
+    recharge_bonus_amount: 10,
+    recharge_notice: '复制报价指令后，请联系管理员并发送支付截图，等待会员卡入账。',
   }
 }
 
@@ -78,6 +96,9 @@ function App() {
         <Route path="/admin/login" element={<AdminLoginPage />} />
         <Route path="/admin/*" element={<AdminShell />} />
         <Route path="/products" element={<Storefront page="products" />} />
+        <Route path="/announcements" element={<AnnouncementsPage />} />
+        <Route path="/me" element={<MemberCenterPage />} />
+        <Route path="/recharge" element={<RechargePage />} />
         <Route path="/feedback" element={<FeedbackPage />} />
         <Route path="*" element={<Storefront page="home" />} />
       </Routes>
@@ -99,6 +120,19 @@ function Shell({ children, title, right }) {
       </header>
       {children}
     </div>
+  )
+}
+
+function PublicNav({ currentUser, activePage = 'home' }) {
+  return (
+    <nav className="site-nav">
+      <Link className={activePage === 'home' ? 'site-nav-link active' : 'site-nav-link'} to="/">首页</Link>
+      <Link className={activePage === 'products' ? 'site-nav-link active' : 'site-nav-link'} to="/products">商品目录</Link>
+      <Link className={activePage === 'announcements' ? 'site-nav-link active' : 'site-nav-link'} to="/announcements">公告页</Link>
+      <Link className={activePage === 'feedback' ? 'site-nav-link active' : 'site-nav-link'} to="/feedback">反馈页</Link>
+      {currentUser && <Link className={activePage === 'member' ? 'site-nav-link active' : 'site-nav-link'} to="/me">会员中心</Link>}
+      {currentUser && <Link className={activePage === 'recharge' ? 'site-nav-link active' : 'site-nav-link'} to="/recharge">会员充值</Link>}
+    </nav>
   )
 }
 
@@ -141,8 +175,18 @@ function Storefront({ page = 'home' }) {
     }
     api.get('/auth/me', authHeader(userToken))
       .then(({ data }) => {
+        const previous = (() => {
+          try {
+            return JSON.parse(localStorage.getItem('ms_user') || 'null')
+          } catch {
+            return null
+          }
+        })()
         setCurrentUser(data.user)
         localStorage.setItem('ms_user', JSON.stringify(data.user))
+        if (previous && Number(data.user.member_balance || 0) > Number(previous.member_balance || 0)) {
+          toast.success(`会员卡余额已到账：${data.user.member_balance} 金币`)
+        }
       })
       .catch((error) => {
         localStorage.removeItem('ms_user_token')
@@ -242,6 +286,17 @@ function Storefront({ page = 'home' }) {
     setLoading(true)
     try {
       const { data } = await api.post('/orders', payload, authHeader(userToken))
+      if (currentUser) {
+        const nextUser = {
+          ...currentUser,
+          member_balance: data.member_balance ?? currentUser.member_balance,
+          member_tier: data.member_tier || currentUser.member_tier,
+          member_discount_rate: data.member_discount_rate ?? currentUser.member_discount_rate,
+          member_tier_label: memberTierLabels[data.member_tier] || currentUser.member_tier_label,
+        }
+        setCurrentUser(nextUser)
+        localStorage.setItem('ms_user', JSON.stringify(nextUser))
+      }
       setSuccessData(data)
       setCart([])
       setCheckoutOpen(false)
@@ -329,7 +384,10 @@ function Storefront({ page = 'home' }) {
           </div>
           <div className="summary-card">
             <p><strong>游戏ID：</strong>{successData.player_id}</p>
-            <p><strong>总价：</strong>{successData.total_price} 金币</p>
+            <p><strong>订单总价：</strong>{successData.total_price} 金币</p>
+            <p><strong>会员实付：</strong>{successData.paid_amount || successData.total_price} 金币</p>
+            <p><strong>优惠金额：</strong>{successData.discount_amount || 0} 金币</p>
+            {successData.member_balance !== undefined && <p><strong>剩余余额：</strong>{successData.member_balance} 金币</p>}
             <p><strong>商品数量：</strong>{successData.items.reduce((sum, item) => sum + item.quantity, 0)} 件</p>
           </div>
           <p className="muted">管理员将在24小时内处理您的订单，请使用 API Key 在订单查询页面查看进度。</p>
@@ -344,11 +402,7 @@ function Storefront({ page = 'home' }) {
       title={page === 'products' ? '商品目录' : '商品商店'}
       right={
         <>
-          <nav className="site-nav">
-            <Link className={page === 'home' ? 'site-nav-link active' : 'site-nav-link'} to="/">首页</Link>
-            <Link className={page === 'products' ? 'site-nav-link active' : 'site-nav-link'} to="/products">商品目录</Link>
-            <Link className="site-nav-link" to="/feedback">反馈页</Link>
-          </nav>
+          <PublicNav currentUser={currentUser} activePage={page === 'products' ? 'products' : 'home'} />
           {currentUser ? (
             <>
               <span className="account-pill">{currentUser.username} · {currentUser.player_id}</span>
@@ -716,6 +770,8 @@ function CartDrawer({ cart, total, onClose, onAdjust, onCheckout, onRemove, onCl
 function CheckoutModal({ currentUser, loading, onClose, onSubmit, cart, total }) {
   const [form, setForm] = useState({ player_id: currentUser?.player_id || '', note: '', email: currentUser?.email || '' })
   const [captcha, setCaptcha] = useState({ token: '', prompt: '', answer: '', expires_in: 0, loading: false })
+  const payableTotal = Math.round(total * Number(currentUser?.member_discount_rate || 1))
+  const discountAmount = Math.max(0, total - payableTotal)
 
   useEffect(() => {
     setForm((current) => ({
@@ -780,6 +836,13 @@ function CheckoutModal({ currentUser, loading, onClose, onSubmit, cart, total })
           联系邮箱
           <input type="email" value={form.email} onChange={(e) => setForm((s) => ({ ...s, email: e.target.value }))} />
         </label>
+        {currentUser && (
+          <div className="summary-card">
+            <p><strong>会员等级：</strong>{currentUser.member_tier_label || memberTierLabels[currentUser.member_tier] || '普通会员'}（{formatMemberDiscount(currentUser.member_discount_rate)}）</p>
+            <p><strong>会员卡余额：</strong>{currentUser.member_balance || 0} 金币</p>
+            <p><strong>优惠金额：</strong>{discountAmount} 金币</p>
+          </div>
+        )}
         <CaptchaField
           answer={captcha.answer}
           loading={captcha.loading}
@@ -788,7 +851,7 @@ function CheckoutModal({ currentUser, loading, onClose, onSubmit, cart, total })
           onRefresh={loadCaptcha}
         />
         <div className="drawer-foot stretch">
-          <strong>应付：{total} 金币</strong>
+          <strong>应付：{payableTotal} 金币</strong>
           <button className="primary-button" disabled={loading}>{loading ? '提交中...' : '提交订单'}</button>
         </div>
       </form>
@@ -898,6 +961,7 @@ function OrderStatusCard({ order }) {
         <p><strong>订单号：</strong>{order.order_number}</p>
         <p><strong>游戏ID：</strong>{order.player_id}</p>
         <p><strong>总价：</strong>{order.total_price} 金币</p>
+        <p><strong>实付：</strong>{order.paid_amount || order.total_price} 金币</p>
         <p><strong>下单时间：</strong>{formatTime(order.created_at)}</p>
       </div>
       <div className="mini-list">
@@ -950,11 +1014,7 @@ function FeedbackPage() {
     <Shell
       title="意见反馈"
       right={
-        <nav className="site-nav">
-          <Link className="site-nav-link" to="/">首页</Link>
-          <Link className="site-nav-link" to="/products">商品目录</Link>
-          <Link className="site-nav-link active" to="/feedback">反馈页</Link>
-        </nav>
+        <PublicNav currentUser={user} activePage="feedback" />
       }
     >
       <section className="feedback-layout">
@@ -975,6 +1035,198 @@ function FeedbackPage() {
           <label>反馈内容<textarea value={form.message} onChange={(e) => setForm((current) => ({ ...current, message: e.target.value }))} placeholder="请描述你遇到的问题或想增加的功能" /></label>
           <button className="primary-button" disabled={loading}>{loading ? '提交中...' : '提交反馈'}</button>
         </form>
+      </section>
+    </Shell>
+  )
+}
+
+function MemberCenterPage() {
+  const [data, setData] = useState({ user: null, orders: [], wallet_logs: [] })
+  const [loading, setLoading] = useState(true)
+  const userToken = localStorage.getItem('ms_user_token') || ''
+
+  useEffect(() => {
+    if (!userToken) {
+      setLoading(false)
+      return
+    }
+    api.get('/me/dashboard', authHeader(userToken))
+      .then(({ data: response }) => setData(response))
+      .catch((error) => toast.error(error?.response?.data?.message || '加载会员中心失败'))
+      .finally(() => setLoading(false))
+  }, [userToken])
+
+  if (!userToken) {
+    return (
+      <Shell title="会员中心" right={<PublicNav currentUser={null} activePage="member" />}>
+        <section className="panel empty-state">
+          <strong>请先登录账号</strong>
+          <p className="muted">登录后才能查看历史订单、会员卡余额和充值记录。</p>
+          <Link className="primary-button" to="/">返回首页</Link>
+        </section>
+      </Shell>
+    )
+  }
+
+  const user = data.user
+
+  return (
+    <Shell title="会员中心" right={<PublicNav currentUser={user} activePage="member" />}>
+      <section className="member-layout">
+        <div className="panel member-summary-grid">
+          <div className="member-summary-card">
+            <p className="eyebrow">MEMBER PROFILE</p>
+            <h2>{user?.username || '加载中...'}</h2>
+            <p className="muted">{user?.member_tier_label || memberTierLabels[user?.member_tier] || '普通会员'} · {formatMemberDiscount(user?.member_discount_rate || 1)}</p>
+          </div>
+          <div className="stat-card"><strong>{user?.member_balance || 0}</strong><span>会员卡余额</span></div>
+          <div className="stat-card"><strong>{user?.total_recharge || 0}</strong><span>累计充值</span></div>
+          <div className="stat-card"><strong>{data.orders.length}</strong><span>历史订单</span></div>
+        </div>
+
+        <div className="member-actions-row">
+          <Link className="primary-button" to="/recharge">会员卡充值</Link>
+          <Link className="ghost-button" to="/">直达首页</Link>
+        </div>
+
+        <section className="panel">
+          <div className="section-toolbar wrap">
+            <div>
+              <h3>历史订单</h3>
+              <p className="muted">这里会显示你使用会员卡支付的全部订单记录。</p>
+            </div>
+          </div>
+          <div className="table-wrap admin-table-wrap">
+            <table>
+              <thead><tr><th>订单号</th><th>提交时间</th><th>总价</th><th>实付</th><th>会员等级</th><th>状态</th></tr></thead>
+              <tbody>
+                {loading ? <tr><td colSpan="6">加载中...</td></tr> : data.orders.map((order) => (
+                  <tr key={order.order_number}>
+                    <td>{order.order_number}</td>
+                    <td>{formatTime(order.created_at)}</td>
+                    <td>{order.total_price}</td>
+                    <td>{order.paid_amount || order.total_price}</td>
+                    <td>{memberTierLabels[order.member_tier] || '普通会员'}</td>
+                    <td><span className={`status-pill ${orderStatusLabels[order.status]?.className || 'badge-warning'}`}>{orderStatusLabels[order.status]?.text || order.status}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="section-toolbar wrap">
+            <div>
+              <h3>余额变动记录</h3>
+              <p className="muted">管理员赠送、充值入账和订单扣款都会记录在这里。</p>
+            </div>
+          </div>
+          <div className="table-wrap admin-table-wrap">
+            <table>
+              <thead><tr><th>时间</th><th>类型</th><th>变动</th><th>余额</th><th>备注</th></tr></thead>
+              <tbody>
+                {loading ? <tr><td colSpan="5">加载中...</td></tr> : data.wallet_logs.map((item) => (
+                  <tr key={item.id}>
+                    <td>{formatTime(item.created_at)}</td>
+                    <td>{item.change_type}</td>
+                    <td>{item.amount > 0 ? `+${item.amount}` : item.amount}</td>
+                    <td>{item.balance_after}</td>
+                    <td>{item.note || '-'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </Shell>
+  )
+}
+
+function RechargePage() {
+  const [siteContent, setSiteContent] = useState(createDefaultSiteContent)
+  const [amount, setAmount] = useState('100')
+  const user = (() => {
+    try {
+      return JSON.parse(localStorage.getItem('ms_user') || 'null')
+    } catch {
+      return null
+    }
+  })()
+
+  useEffect(() => {
+    api.get('/site-content').then(({ data }) => setSiteContent({ ...createDefaultSiteContent(), ...data })).catch(() => {})
+  }, [])
+
+  const rechargeAmount = Math.max(0, Number(amount) || 0)
+  const bonusAmount = getRechargeBonusAmount(rechargeAmount, Number(siteContent.recharge_bonus_minimum || 100), Number(siteContent.recharge_bonus_amount || 10))
+  const command = buildRechargeCommand(rechargeAmount)
+
+  return (
+    <Shell title="会员充值" right={<PublicNav currentUser={user} activePage="recharge" />}>
+      <section className="feedback-layout">
+        <div className="panel feedback-intro">
+          <p className="eyebrow">RECHARGE DESK</p>
+          <h2>充值会员卡余额</h2>
+          <p className="muted">输入充值金额后，会自动生成支付报价指令。复制后在游戏内执行，并把截图发给管理员处理。</p>
+          <div className="summary-card">
+            <p><strong>当前优惠：</strong>满 {siteContent.recharge_bonus_minimum || 100} 送 {siteContent.recharge_bonus_amount || 10}</p>
+            <p><strong>预计到账：</strong>{rechargeAmount + bonusAmount} 金币</p>
+          </div>
+          <p className="account-banner">{siteContent.recharge_notice}</p>
+        </div>
+        <div className="panel form-grid feedback-form">
+          <h3>生成充值指令</h3>
+          <label>充值金额<input type="number" min="1" value={amount} onChange={(e) => setAmount(e.target.value)} /></label>
+          <div className="summary-card">
+            <p><strong>支付指令：</strong></p>
+            <div className="copy-row"><code>{command}</code><CopyButton value={command} label="复制指令" /></div>
+            <p><strong>基础金额：</strong>{rechargeAmount} 金币</p>
+            <p><strong>赠送金额：</strong>{bonusAmount} 金币</p>
+            <p><strong>预计入账：</strong>{rechargeAmount + bonusAmount} 金币</p>
+          </div>
+          <p className="muted">请添加管理员并发送支付截图，管理员确认后会为你的会员卡手动入账。</p>
+          <div className="button-group">
+            <Link className="ghost-button" to="/">直达首页</Link>
+            <Link className="primary-button" to="/me">查看会员中心</Link>
+          </div>
+        </div>
+      </section>
+    </Shell>
+  )
+}
+
+function AnnouncementsPage() {
+  const [announcements, setAnnouncements] = useState([])
+  const user = (() => {
+    try {
+      return JSON.parse(localStorage.getItem('ms_user') || 'null')
+    } catch {
+      return null
+    }
+  })()
+
+  useEffect(() => {
+    api.get('/announcements').then(({ data }) => setAnnouncements(data)).catch(() => toast.error('获取公告失败'))
+  }, [])
+
+  return (
+    <Shell title="公告中心" right={<PublicNav currentUser={user} activePage="announcements" />}>
+      <section className="announcement-page-grid">
+        {announcements.map((item) => (
+          <article className="panel announcement-page-card" key={item.id}>
+            <div className="section-toolbar wrap compact-toolbar">
+              <div>
+                <p className="eyebrow">{item.is_pinned ? 'PINNED NOTICE' : 'SERVER NOTICE'}</p>
+                <h3>{item.title}</h3>
+              </div>
+              {item.is_pinned && <span className="status-pill badge-warning">置顶</span>}
+            </div>
+            <p className="muted announcement-body-text">{item.content}</p>
+            <p className="muted tiny-text">发布时间：{formatTime(item.updated_at || item.created_at)}</p>
+          </article>
+        ))}
       </section>
     </Shell>
   )
@@ -1027,6 +1279,7 @@ function AdminShell() {
   const [users, setUsers] = useState([])
   const [invites, setInvites] = useState([])
   const [feedbacks, setFeedbacks] = useState([])
+  const [announcements, setAnnouncements] = useState([])
   const [siteContentForm, setSiteContentForm] = useState(createDefaultSiteContent)
   const [statusFilter, setStatusFilter] = useState('all')
   const [feedbackStatusFilter, setFeedbackStatusFilter] = useState('all')
@@ -1034,8 +1287,10 @@ function AdminShell() {
   const [userSearch, setUserSearch] = useState('')
   const [productSearch, setProductSearch] = useState('')
   const [inviteForm, setInviteForm] = useState({ count: 1, note: '', assigned_to: '' })
+  const [announcementForm, setAnnouncementForm] = useState({ title: '', content: '', is_pinned: false })
   const [productForm, setProductForm] = useState(emptyProductForm)
   const [editingProductId, setEditingProductId] = useState(null)
+  const [editingAnnouncementId, setEditingAnnouncementId] = useState(null)
   const [imageUploading, setImageUploading] = useState(false)
   const [shipTarget, setShipTarget] = useState(null)
   const [shippingInstruction, setShippingInstruction] = useState('')
@@ -1045,6 +1300,7 @@ function AdminShell() {
   const [passwordModal, setPasswordModal] = useState({ open: false, id: null, password: '', confirmPassword: '' })
   const [banModal, setBanModal] = useState({ open: false, user: null, reason: '', nextStatus: true })
   const [inviteEditModal, setInviteEditModal] = useState({ open: false, invite: null, note: '', assigned_to: '' })
+  const [memberModal, setMemberModal] = useState({ open: false, user: null, member_tier: 'none', balance_delta: '0', recharge_delta: '0', note: '' })
 
   useEffect(() => {
     const token = localStorage.getItem('ms_token')
@@ -1089,6 +1345,11 @@ function AdminShell() {
     setFeedbacks(data)
   }
 
+  const loadAnnouncements = async () => {
+    const { data } = await api.get('/admin/announcements')
+    setAnnouncements(data)
+  }
+
   const loadSiteContent = async () => {
     const { data } = await api.get('/admin/site-content')
     setSiteContentForm({ ...createDefaultSiteContent(), ...data })
@@ -1117,6 +1378,7 @@ function AdminShell() {
     if (section === 'users') loadUsers().catch(() => toast.error('加载用户失败'))
     if (section === 'invites') loadInvites().catch(() => toast.error('加载邀请码失败'))
     if (section === 'feedbacks') loadFeedbacks().catch(() => toast.error('加载反馈失败'))
+    if (section === 'announcements') loadAnnouncements().catch(() => toast.error('加载公告失败'))
     if (section === 'content') {
       loadSiteContent().catch(() => toast.error('加载页面内容失败'))
       loadProducts().catch(() => toast.error('加载商品失败'))
@@ -1130,7 +1392,7 @@ function AdminShell() {
 
   useEffect(() => {
     const path = location.pathname.split('/').at(-1)
-    if (['orders', 'products', 'users', 'invites', 'feedbacks', 'admins', 'content'].includes(path)) setSection(path)
+    if (['orders', 'products', 'users', 'invites', 'feedbacks', 'announcements', 'admins', 'content'].includes(path)) setSection(path)
   }, [location.pathname])
 
   if (!tokenReady) return null
@@ -1234,6 +1496,8 @@ function AdminShell() {
     e.preventDefault()
     const payload = {
       ...siteContentForm,
+      recharge_bonus_minimum: Number(siteContentForm.recharge_bonus_minimum || 100),
+      recharge_bonus_amount: Number(siteContentForm.recharge_bonus_amount || 10),
       announcements: siteContentForm.announcements.map((item) => item.trim()).filter(Boolean),
       features: siteContentForm.features
         .map((item) => ({ title: item.title.trim(), text: item.text.trim() }))
@@ -1324,6 +1588,53 @@ function AdminShell() {
     loadInvites()
   }
 
+  const submitMemberUpdate = async (event) => {
+    event.preventDefault()
+    if (!memberModal.user) return
+    await api.put(`/admin/users/${memberModal.user.id}/member`, {
+      member_tier: memberModal.member_tier,
+      balance_delta: Number(memberModal.balance_delta),
+      recharge_delta: Number(memberModal.recharge_delta),
+      note: memberModal.note,
+    })
+    toast.success('会员资料已更新')
+    setMemberModal({ open: false, user: null, member_tier: 'none', balance_delta: '0', recharge_delta: '0', note: '' })
+    loadUsers()
+  }
+
+  const submitAnnouncement = async (event) => {
+    event.preventDefault()
+    if (!announcementForm.title.trim() || !announcementForm.content.trim()) {
+      toast.error('请填写完整公告内容')
+      return
+    }
+    if (editingAnnouncementId) {
+      await api.put(`/admin/announcements/${editingAnnouncementId}`, {
+        ...announcementForm,
+        title: announcementForm.title.trim(),
+        content: announcementForm.content.trim(),
+      })
+      toast.success('公告已更新')
+    } else {
+      await api.post('/admin/announcements', {
+        ...announcementForm,
+        title: announcementForm.title.trim(),
+        content: announcementForm.content.trim(),
+      })
+      toast.success('公告已发布')
+    }
+    setAnnouncementForm({ title: '', content: '', is_pinned: false })
+    setEditingAnnouncementId(null)
+    loadAnnouncements()
+  }
+
+  const deleteAnnouncement = async (id) => {
+    await api.delete(`/admin/announcements/${id}`)
+    toast.success('公告已删除')
+    setConfirmAction(null)
+    loadAnnouncements()
+  }
+
   const updateFeedbackStatus = async (feedback, nextStatus) => {
     await api.put(`/admin/feedbacks/${feedback.id}/status`, { status: nextStatus })
     toast.success(nextStatus === 'processed' ? '反馈已标记为已处理' : '反馈已改回未处理')
@@ -1342,6 +1653,7 @@ function AdminShell() {
           <button className={section === 'users' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/users')}>用户管理</button>
           <button className={section === 'invites' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/invites')}>邀请码管理</button>
           <button className={section === 'feedbacks' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/feedbacks')}>反馈管理</button>
+          <button className={section === 'announcements' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/announcements')}>公告管理</button>
           <button className={section === 'content' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/content')}>内容管理</button>
           <button className={section === 'admins' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/admins')}>管理员管理</button>
         </aside>
@@ -1477,6 +1789,13 @@ function AdminShell() {
                   ))}
                 </div>
 
+                <div className="panel inset-panel">
+                  <h4>会员充值设置</h4>
+                  <label>满额门槛<input type="number" value={siteContentForm.recharge_bonus_minimum || 100} onChange={(e) => setSiteContentForm((s) => ({ ...s, recharge_bonus_minimum: e.target.value }))} /></label>
+                  <label>赠送金额<input type="number" value={siteContentForm.recharge_bonus_amount || 10} onChange={(e) => setSiteContentForm((s) => ({ ...s, recharge_bonus_amount: e.target.value }))} /></label>
+                  <label>充值提示<textarea value={siteContentForm.recharge_notice || ''} onChange={(e) => setSiteContentForm((s) => ({ ...s, recharge_notice: e.target.value }))} /></label>
+                </div>
+
                 <div className="panel inset-panel full-span">
                   <h4>卖点卡片</h4>
                   <label>卖点区标题<input value={siteContentForm.feature_title} onChange={(e) => setSiteContentForm((s) => ({ ...s, feature_title: e.target.value }))} /></label>
@@ -1551,13 +1870,16 @@ function AdminShell() {
               </div>
               <div className="table-wrap admin-table-wrap">
                 <table>
-                  <thead><tr><th>账号名</th><th>游戏ID</th><th>邀请码</th><th>邮箱</th><th>状态</th><th>最近登录</th><th>操作</th></tr></thead>
+                  <thead><tr><th>账号名</th><th>游戏ID</th><th>邀请码</th><th>会员</th><th>余额</th><th>累计充值</th><th>邮箱</th><th>状态</th><th>最近登录</th><th>操作</th></tr></thead>
                   <tbody>
                     {users.map((item) => (
                       <tr key={item.id}>
                         <td>{item.username}</td>
                         <td>{item.player_id}</td>
                         <td><code>{item.invite_code || '-'}</code></td>
+                        <td>{memberTierLabels[item.member_tier] || '普通会员'}</td>
+                        <td>{item.member_balance || 0}</td>
+                        <td>{item.total_recharge || 0}</td>
                         <td>{item.email || '-'}</td>
                         <td>
                           <div className="user-status-cell">
@@ -1567,6 +1889,7 @@ function AdminShell() {
                         </td>
                         <td>{formatTime(item.last_login_at)}</td>
                         <td className="row-actions">
+                          <button onClick={() => setMemberModal({ open: true, user: item, member_tier: item.member_tier || 'none', balance_delta: '0', recharge_delta: '0', note: '' })}>会员设置</button>
                           {item.is_banned ? (
                             <button onClick={() => setBanModal({ open: true, user: item, reason: '', nextStatus: false })}>解除封禁</button>
                           ) : (
@@ -1577,6 +1900,47 @@ function AdminShell() {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            </section>
+          )}
+
+          {section === 'announcements' && (
+            <section className="panel split-panel product-management-panel">
+              <form className="form-grid product-editor-form" onSubmit={submitAnnouncement}>
+                <h3>{editingAnnouncementId ? '编辑公告' : '发布公告'}</h3>
+                <label>公告标题<input value={announcementForm.title} onChange={(e) => setAnnouncementForm((s) => ({ ...s, title: e.target.value }))} /></label>
+                <label>公告内容<textarea value={announcementForm.content} onChange={(e) => setAnnouncementForm((s) => ({ ...s, content: e.target.value }))} /></label>
+                <label className="switch-row"><input type="checkbox" checked={announcementForm.is_pinned} onChange={(e) => setAnnouncementForm((s) => ({ ...s, is_pinned: e.target.checked }))} />置顶公告</label>
+                <div className="button-group">
+                  {editingAnnouncementId && <button type="button" className="ghost-button" onClick={() => { setEditingAnnouncementId(null); setAnnouncementForm({ title: '', content: '', is_pinned: false }) }}>取消编辑</button>}
+                  <button className="primary-button">{editingAnnouncementId ? '保存公告' : '发布公告'}</button>
+                </div>
+              </form>
+              <div className="product-list-panel">
+                <div className="section-toolbar wrap compact-toolbar">
+                  <div>
+                    <h3>公告列表</h3>
+                    <p className="muted">支持置顶公告，前台公告中心会自动按置顶和更新时间排序。</p>
+                  </div>
+                </div>
+                <div className="table-wrap admin-table-wrap product-table-wrap">
+                  <table>
+                    <thead><tr><th>标题</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead>
+                    <tbody>
+                      {announcements.map((item) => (
+                        <tr key={item.id}>
+                          <td>{item.title}</td>
+                          <td><span className={`status-pill ${item.is_pinned ? 'badge-warning' : 'badge-success'}`}>{item.is_pinned ? '置顶' : '普通'}</span></td>
+                          <td>{formatTime(item.updated_at || item.created_at)}</td>
+                          <td className="row-actions">
+                            <button onClick={() => { setEditingAnnouncementId(item.id); setAnnouncementForm({ title: item.title, content: item.content, is_pinned: item.is_pinned }) }}>编辑</button>
+                            <button onClick={() => setConfirmAction({ title: '删除公告', message: `确认删除公告 ${item.title} 吗？`, onConfirm: () => deleteAnnouncement(item.id) })}>删除</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </section>
           )}
@@ -1743,6 +2107,27 @@ function AdminShell() {
             <div className="button-group">
               <button type="button" className="ghost-button" onClick={() => setBanModal({ open: false, user: null, reason: '', nextStatus: true })}>取消</button>
               <button className="primary-button">确认{banModal.nextStatus ? '封禁' : '解除封禁'}</button>
+            </div>
+          </form>
+        </ModalFrame>
+      )}
+
+      {memberModal.open && memberModal.user && (
+        <ModalFrame title={`会员设置：${memberModal.user.username}`} onClose={() => setMemberModal({ open: false, user: null, member_tier: 'none', balance_delta: '0', recharge_delta: '0', note: '' })}>
+          <form className="form-grid" onSubmit={submitMemberUpdate}>
+            <label>会员等级
+              <select value={memberModal.member_tier} onChange={(e) => setMemberModal((s) => ({ ...s, member_tier: e.target.value }))}>
+                <option value="none">普通会员</option>
+                <option value="iron">铁锭会员</option>
+                <option value="gold">黄金会员</option>
+              </select>
+            </label>
+            <label>余额变动（可正可负）<input type="number" value={memberModal.balance_delta} onChange={(e) => setMemberModal((s) => ({ ...s, balance_delta: e.target.value }))} /></label>
+            <label>累计充值增加<input type="number" min="0" value={memberModal.recharge_delta} onChange={(e) => setMemberModal((s) => ({ ...s, recharge_delta: e.target.value }))} /></label>
+            <label>备注<textarea value={memberModal.note} onChange={(e) => setMemberModal((s) => ({ ...s, note: e.target.value }))} placeholder="例如：管理员赠送 / 充值入账 / 活动补偿" /></label>
+            <div className="button-group">
+              <button type="button" className="ghost-button" onClick={() => setMemberModal({ open: false, user: null, member_tier: 'none', balance_delta: '0', recharge_delta: '0', note: '' })}>取消</button>
+              <button className="primary-button">保存会员资料</button>
             </div>
           </form>
         </ModalFrame>

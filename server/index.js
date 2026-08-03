@@ -112,6 +112,9 @@ function defaultSiteContent() {
       { title: '人工发货', text: '管理员后台审核订单并填写发放指令，适合各类生存与 RPG 服务器。' },
       { title: '状态可追踪', text: '玩家随时使用订单号或 API Key 查询发货进度与备注。' },
     ],
+    recharge_bonus_minimum: 100,
+    recharge_bonus_amount: 10,
+    recharge_notice: '复制报价指令后，请添加管理员并发送支付截图，等待管理员为会员卡入账。',
   }
 }
 
@@ -330,6 +333,10 @@ function normalizeOrder(row) {
     player_id: row.player_id,
     items: row.items,
     total_price: row.total_price,
+    paid_amount: row.paid_amount ?? row.total_price,
+    discount_amount: row.discount_amount ?? 0,
+    member_tier: row.member_tier || 'none',
+    member_discount_rate: Number(row.member_discount_rate || 1),
     status: row.status,
     note: row.note,
     email: row.email,
@@ -342,17 +349,48 @@ function normalizeOrder(row) {
 }
 
 function normalizeUser(row) {
+  const tierMeta = pickEffectiveMemberTier(row)
   return {
     id: row.id,
     username: row.username,
     player_id: row.player_id,
     email: row.email,
     invite_code: row.invite_code,
+    member_tier: tierMeta.tier,
+    member_tier_label: tierMeta.label,
+    member_discount_rate: tierMeta.discountRate,
+    member_balance: row.member_balance,
+    total_recharge: row.total_recharge,
     is_banned: row.is_banned,
     banned_reason: row.banned_reason,
     created_at: row.created_at,
     last_login_at: row.last_login_at,
   }
+}
+
+function getMemberTierInfo(totalRecharge = 0) {
+  if (totalRecharge >= 50000) return { tier: 'gold', label: '黄金会员', discountRate: 0.8 }
+  if (totalRecharge >= 10000) return { tier: 'iron', label: '铁锭会员', discountRate: 0.9 }
+  return { tier: 'none', label: '普通会员', discountRate: 1 }
+}
+
+function getMemberTierMeta(tier) {
+  if (tier === 'gold') return { tier: 'gold', label: '黄金会员', discountRate: 0.8 }
+  if (tier === 'iron') return { tier: 'iron', label: '铁锭会员', discountRate: 0.9 }
+  return { tier: 'none', label: '普通会员', discountRate: 1 }
+}
+
+function pickEffectiveMemberTier(user) {
+  const auto = getMemberTierInfo(Number(user.total_recharge || 0))
+  const manual = getMemberTierMeta(user.member_tier)
+  if (manual.tier === 'gold' || auto.tier === 'gold') return getMemberTierMeta('gold')
+  if (manual.tier === 'iron' || auto.tier === 'iron') return getMemberTierMeta('iron')
+  return getMemberTierMeta('none')
+}
+
+function getRechargeBonusAmount(amount, bonusMin = 100, bonusAmount = 10) {
+  if (amount >= bonusMin) return Math.floor(amount / bonusMin) * bonusAmount
+  return 0
 }
 
 function normalizeInvite(row) {
@@ -383,6 +421,27 @@ function normalizeFeedback(row) {
     processed_by_admin: row.processed_by_admin,
     created_at: row.created_at,
   }
+}
+
+function normalizeWalletLog(row) {
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    change_type: row.change_type,
+    amount: row.amount,
+    balance_after: row.balance_after,
+    note: row.note,
+    created_by_admin: row.created_by_admin,
+    created_at: row.created_at,
+  }
+}
+
+async function createWalletLog(clientOrPool, { userId, changeType, amount, balanceAfter, note = '', createdByAdmin = null }) {
+  await clientOrPool.query(
+    `INSERT INTO wallet_logs (user_id, change_type, amount, balance_after, note, created_by_admin)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [userId, changeType, amount, balanceAfter, note, createdByAdmin],
+  )
 }
 
 async function initDatabase() {
@@ -416,6 +475,9 @@ async function initDatabase() {
       player_id TEXT UNIQUE NOT NULL,
       email TEXT NOT NULL DEFAULT '',
       invite_code TEXT UNIQUE,
+      member_tier TEXT NOT NULL DEFAULT 'none',
+      member_balance INTEGER NOT NULL DEFAULT 0,
+      total_recharge INTEGER NOT NULL DEFAULT 0,
       password_hash TEXT NOT NULL,
       is_banned BOOLEAN NOT NULL DEFAULT FALSE,
       banned_reason TEXT NOT NULL DEFAULT '',
@@ -424,6 +486,9 @@ async function initDatabase() {
     )
   `)
   await query('ALTER TABLE users ADD COLUMN IF NOT EXISTS invite_code TEXT')
+  await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS member_tier TEXT NOT NULL DEFAULT 'none'")
+  await query('ALTER TABLE users ADD COLUMN IF NOT EXISTS member_balance INTEGER NOT NULL DEFAULT 0')
+  await query('ALTER TABLE users ADD COLUMN IF NOT EXISTS total_recharge INTEGER NOT NULL DEFAULT 0')
   await query('CREATE UNIQUE INDEX IF NOT EXISTS users_invite_code_key ON users(invite_code) WHERE invite_code IS NOT NULL')
   await query(`
     CREATE TABLE IF NOT EXISTS invite_codes (
@@ -447,6 +512,10 @@ async function initDatabase() {
       player_id TEXT NOT NULL,
       items JSONB NOT NULL,
       total_price INTEGER NOT NULL,
+      paid_amount INTEGER NOT NULL DEFAULT 0,
+      discount_amount INTEGER NOT NULL DEFAULT 0,
+      member_tier TEXT NOT NULL DEFAULT 'none',
+      member_discount_rate NUMERIC(4,2) NOT NULL DEFAULT 1,
       status TEXT NOT NULL CHECK (status IN ('pending', 'shipped', 'cancelled')),
       note TEXT,
       email TEXT,
@@ -457,6 +526,10 @@ async function initDatabase() {
   `)
   await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE SET NULL')
   await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS account_username TEXT')
+  await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_amount INTEGER NOT NULL DEFAULT 0')
+  await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_amount INTEGER NOT NULL DEFAULT 0')
+  await query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS member_tier TEXT NOT NULL DEFAULT 'none'")
+  await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS member_discount_rate NUMERIC(4,2) NOT NULL DEFAULT 1')
   await query(`
     CREATE TABLE IF NOT EXISTS activity_logs (
       id SERIAL PRIMARY KEY,
@@ -489,6 +562,30 @@ async function initDatabase() {
   await query("ALTER TABLE feedbacks ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending'")
   await query('ALTER TABLE feedbacks ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ')
   await query('ALTER TABLE feedbacks ADD COLUMN IF NOT EXISTS processed_by_admin TEXT')
+  await query(`
+    CREATE TABLE IF NOT EXISTS wallet_logs (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      change_type TEXT NOT NULL,
+      amount INTEGER NOT NULL,
+      balance_after INTEGER NOT NULL,
+      note TEXT NOT NULL DEFAULT '',
+      created_by_admin TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `)
+  await query(`
+    CREATE TABLE IF NOT EXISTS announcements (
+      id SERIAL PRIMARY KEY,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      is_pinned BOOLEAN NOT NULL DEFAULT FALSE,
+      created_by_admin_id INTEGER REFERENCES admins(id) ON DELETE SET NULL,
+      created_by_admin TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `)
 }
 
 async function ensureSeedData() {
@@ -530,6 +627,15 @@ async function ensureSeedData() {
       [seedCode, '系统初始化邀请码', '首位测试玩家', admin.id],
     )
     await logAction('seed_invite_created', { code: seedCode })
+  }
+
+  const announcementCount = await getRow('SELECT COUNT(*)::int AS count FROM announcements')
+  if (announcementCount.count === 0 && admin) {
+    await query(
+      `INSERT INTO announcements (title, content, is_pinned, created_by_admin_id, created_by_admin)
+       VALUES ($1, $2, $3, $4, $5)`,
+      ['欢迎来到补给中心', '这里会展示服务器最新公告、礼包发放说明和限时活动信息。', true, admin.id, admin.username],
+    )
   }
 }
 
@@ -687,6 +793,29 @@ app.get('/api/auth/me', userAuthRequired, async (req, res) => {
   res.json({ user: normalizeUser(req.user) })
 })
 
+app.get('/api/me/dashboard', userAuthRequired, async (req, res) => {
+  try {
+    const orders = await getRows('SELECT * FROM orders WHERE user_id = $1 ORDER BY created_at DESC, id DESC', [req.user.id])
+    const walletLogs = await getRows('SELECT * FROM wallet_logs WHERE user_id = $1 ORDER BY created_at DESC, id DESC LIMIT 50', [req.user.id])
+    res.json({
+      user: normalizeUser(req.user),
+      orders: orders.map(normalizeOrder),
+      wallet_logs: walletLogs.map(normalizeWalletLog),
+    })
+  } catch {
+    res.status(500).json({ message: '获取会员中心信息失败' })
+  }
+})
+
+app.get('/api/announcements', async (req, res) => {
+  try {
+    const rows = await getRows('SELECT * FROM announcements ORDER BY is_pinned DESC, updated_at DESC, id DESC')
+    res.json(rows)
+  } catch {
+    res.status(500).json({ message: '获取公告失败' })
+  }
+})
+
 app.post('/api/admin/uploads', authRequired, upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: '未上传文件' })
@@ -722,8 +851,18 @@ app.post('/api/orders', userAuthRequired, async (req, res) => {
     const productIds = [...new Set(items.map((item) => Number(item.product_id)).filter(Boolean))]
     const normalizedItems = []
     let totalPrice = 0
+    const tierMeta = pickEffectiveMemberTier(activeUser)
+    let paidAmount = 0
+    let discountAmount = 0
 
     const orderResult = await withTransaction(async (client) => {
+      const { rows: userRows } = await client.query('SELECT * FROM users WHERE id = $1 FOR UPDATE', [activeUser.id])
+      const lockedUser = userRows[0]
+      if (!lockedUser) {
+        const error = new Error('账号不存在或登录已失效')
+        error.statusCode = 401
+        throw error
+      }
       const { rows: products } = productIds.length
         ? await client.query('SELECT * FROM products WHERE id = ANY($1::int[]) FOR UPDATE', [productIds])
         : { rows: [] }
@@ -751,12 +890,21 @@ app.post('/api/orders', userAuthRequired, async (req, res) => {
         totalPrice += product.price * quantity
       }
 
-    let orderNumber = generateOrderNumber()
-    let apiKey = generateApiKey()
-    while (await getRow('SELECT 1 FROM orders WHERE order_number = $1 OR api_key = $2', [orderNumber, apiKey])) {
-      orderNumber = generateOrderNumber()
-      apiKey = generateApiKey()
-    }
+      paidAmount = Math.max(0, Math.round(totalPrice * tierMeta.discountRate))
+      discountAmount = Math.max(0, totalPrice - paidAmount)
+
+      if (Number(lockedUser.member_balance || 0) < paidAmount) {
+        const error = new Error(`会员卡余额不足，当前余额 ${lockedUser.member_balance || 0} 金币，应付 ${paidAmount} 金币`)
+        error.statusCode = 400
+        throw error
+      }
+
+      let orderNumber = generateOrderNumber()
+      let apiKey = generateApiKey()
+      while (await getRow('SELECT 1 FROM orders WHERE order_number = $1 OR api_key = $2', [orderNumber, apiKey])) {
+        orderNumber = generateOrderNumber()
+        apiKey = generateApiKey()
+      }
 
       for (const item of normalizedItems) {
         await client.query(
@@ -768,10 +916,20 @@ app.post('/api/orders', userAuthRequired, async (req, res) => {
         )
       }
 
+      const nextBalance = Number(lockedUser.member_balance || 0) - paidAmount
+      await client.query('UPDATE users SET member_balance = $1 WHERE id = $2', [nextBalance, lockedUser.id])
+      await createWalletLog(client, {
+        userId: lockedUser.id,
+        changeType: 'order_payment',
+        amount: -paidAmount,
+        balanceAfter: nextBalance,
+        note: `订单支付 ${orderNumber}`,
+      })
+
       await client.query(
         `INSERT INTO orders
-        (order_number, api_key, user_id, account_username, player_id, items, total_price, status, note, email)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'pending', $8, $9)`,
+        (order_number, api_key, user_id, account_username, player_id, items, total_price, paid_amount, discount_amount, member_tier, member_discount_rate, status, note, email)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, 'pending', $12, $13)`,
         [
           orderNumber,
           apiKey,
@@ -780,30 +938,39 @@ app.post('/api/orders', userAuthRequired, async (req, res) => {
           normalizedPlayerId,
           JSON.stringify(normalizedItems),
           totalPrice,
+          paidAmount,
+          discountAmount,
+          tierMeta.tier,
+          tierMeta.discountRate,
           String(note || ''),
           activeUser?.email || normalizedEmail,
         ],
       )
 
-      return { normalizedItems, totalPrice, orderNumber, apiKey }
+      return { normalizedItems, totalPrice, paidAmount, discountAmount, orderNumber, apiKey, memberBalance: nextBalance }
     })
 
     await logAction('order_created', {
-      orderNumber,
+      orderNumber: orderResult.orderNumber,
       playerId: normalizedPlayerId,
-      totalPrice,
+      totalPrice: orderResult.totalPrice,
       userId: activeUser?.id || null,
       username: activeUser?.username || null,
     })
 
     res.status(201).json({
-      order_number: orderNumber,
-      api_key: apiKey,
+      order_number: orderResult.orderNumber,
+      api_key: orderResult.apiKey,
       user_id: activeUser?.id || null,
       account_username: activeUser?.username || null,
       player_id: normalizedPlayerId,
       items: orderResult.normalizedItems,
       total_price: orderResult.totalPrice,
+      paid_amount: orderResult.paidAmount,
+      discount_amount: orderResult.discountAmount,
+      member_tier: tierMeta.tier,
+      member_discount_rate: tierMeta.discountRate,
+      member_balance: orderResult.memberBalance,
       note: String(note || ''),
       email: activeUser?.email || normalizedEmail,
       status: 'pending',
@@ -1030,14 +1197,14 @@ app.get('/api/admin/users', authRequired, async (req, res) => {
     const search = String(req.query.search || '').trim()
     const rows = search
       ? await getRows(
-        `SELECT id, username, player_id, email, invite_code, is_banned, banned_reason, created_at, last_login_at
+        `SELECT id, username, player_id, email, invite_code, member_tier, member_balance, total_recharge, is_banned, banned_reason, created_at, last_login_at
          FROM users
-         WHERE username ILIKE $1 OR player_id ILIKE $1 OR email ILIKE $1 OR invite_code ILIKE $1
+         WHERE username ILIKE $1 OR player_id ILIKE $1 OR email ILIKE $1 OR invite_code ILIKE $1 OR member_tier ILIKE $1
          ORDER BY created_at DESC, id DESC`,
         [`%${search}%`],
       )
       : await getRows(
-        `SELECT id, username, player_id, email, invite_code, is_banned, banned_reason, created_at, last_login_at
+        `SELECT id, username, player_id, email, invite_code, member_tier, member_balance, total_recharge, is_banned, banned_reason, created_at, last_login_at
          FROM users
          ORDER BY created_at DESC, id DESC
          LIMIT 100`,
@@ -1059,7 +1226,7 @@ app.put('/api/admin/users/:id/ban', authRequired, async (req, res) => {
       `UPDATE users
        SET is_banned = $1, banned_reason = $2
        WHERE id = $3
-       RETURNING id, username, player_id, email, is_banned, banned_reason, created_at, last_login_at`,
+       RETURNING id, username, player_id, email, invite_code, member_tier, member_balance, total_recharge, is_banned, banned_reason, created_at, last_login_at`,
       [is_banned, is_banned ? String(banned_reason || '').trim() : '', id],
     )
     await logAction(is_banned ? 'user_banned' : 'user_unbanned', {
@@ -1071,6 +1238,141 @@ app.put('/api/admin/users/:id/ban', authRequired, async (req, res) => {
     res.json(updated)
   } catch {
     res.status(500).json({ message: '更新封禁状态失败' })
+  }
+})
+
+app.put('/api/admin/users/:id/member', authRequired, async (req, res) => {
+  try {
+    const { id } = req.params
+    const { member_tier, balance_delta = 0, recharge_delta = 0, note = '' } = req.body || {}
+    const normalizedBalanceDelta = Number(balance_delta)
+    const normalizedRechargeDelta = Number(recharge_delta)
+    if (!Number.isInteger(normalizedBalanceDelta) || !Number.isInteger(normalizedRechargeDelta)) {
+      return res.status(400).json({ message: '余额变动和累计充值变动必须是整数' })
+    }
+    if (!['none', 'iron', 'gold', undefined].includes(member_tier)) {
+      return res.status(400).json({ message: '会员等级无效' })
+    }
+
+    const result = await withTransaction(async (client) => {
+      const { rows } = await client.query('SELECT * FROM users WHERE id = $1 FOR UPDATE', [id])
+      const user = rows[0]
+      if (!user) {
+        const error = new Error('用户不存在')
+        error.statusCode = 404
+        throw error
+      }
+
+      const nextBalance = Number(user.member_balance || 0) + normalizedBalanceDelta
+      const nextTotalRecharge = Math.max(0, Number(user.total_recharge || 0) + normalizedRechargeDelta)
+      if (nextBalance < 0) {
+        const error = new Error('会员卡余额不能小于 0')
+        error.statusCode = 400
+        throw error
+      }
+
+      const autoTier = getMemberTierInfo(nextTotalRecharge).tier
+      let nextTier = member_tier || user.member_tier || 'none'
+      if (autoTier === 'gold' || nextTier === 'gold') nextTier = 'gold'
+      else if (autoTier === 'iron' || nextTier === 'iron') nextTier = 'iron'
+      else nextTier = 'none'
+
+      const updatedResult = await client.query(
+        `UPDATE users
+         SET member_tier = $1, member_balance = $2, total_recharge = $3
+         WHERE id = $4
+         RETURNING *`,
+        [nextTier, nextBalance, nextTotalRecharge, id],
+      )
+      const updated = updatedResult.rows[0]
+
+      if (normalizedBalanceDelta !== 0) {
+        await createWalletLog(client, {
+          userId: updated.id,
+          changeType: normalizedBalanceDelta > 0 ? (normalizedRechargeDelta > 0 ? 'recharge' : 'gift') : 'admin_adjustment',
+          amount: normalizedBalanceDelta,
+          balanceAfter: nextBalance,
+          note: String(note || '').trim() || (normalizedRechargeDelta > 0 ? '管理员充值入账' : '管理员余额调整'),
+          createdByAdmin: req.admin.username,
+        })
+      }
+
+      return updated
+    })
+
+    await logAction('user_member_updated', {
+      id,
+      memberTier: result.member_tier,
+      balanceDelta: normalizedBalanceDelta,
+      rechargeDelta: normalizedRechargeDelta,
+      admin: req.admin.username,
+    })
+    res.json(normalizeUser(result))
+  } catch (error) {
+    if (error?.statusCode) return res.status(error.statusCode).json({ message: error.message })
+    res.status(500).json({ message: '更新会员信息失败' })
+  }
+})
+
+app.get('/api/admin/announcements', authRequired, async (req, res) => {
+  try {
+    const rows = await getRows('SELECT * FROM announcements ORDER BY is_pinned DESC, updated_at DESC, id DESC')
+    res.json(rows)
+  } catch {
+    res.status(500).json({ message: '获取公告失败' })
+  }
+})
+
+app.post('/api/admin/announcements', authRequired, async (req, res) => {
+  try {
+    const { title, content, is_pinned = false } = req.body || {}
+    if (!title || !content) return res.status(400).json({ message: '公告标题和内容不能为空' })
+    const created = await getRow(
+      `INSERT INTO announcements (title, content, is_pinned, created_by_admin_id, created_by_admin)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [String(title).trim(), String(content).trim(), Boolean(is_pinned), req.admin.id, req.admin.username],
+    )
+    await logAction('announcement_created', { id: created.id, admin: req.admin.username })
+    res.status(201).json(created)
+  } catch {
+    res.status(500).json({ message: '创建公告失败' })
+  }
+})
+
+app.put('/api/admin/announcements/:id', authRequired, async (req, res) => {
+  try {
+    const { id } = req.params
+    const { title, content, is_pinned } = req.body || {}
+    const announcement = await getRow('SELECT * FROM announcements WHERE id = $1', [id])
+    if (!announcement) return res.status(404).json({ message: '公告不存在' })
+    const updated = await getRow(
+      `UPDATE announcements
+       SET title = $1, content = $2, is_pinned = $3, updated_at = NOW()
+       WHERE id = $4
+       RETURNING *`,
+      [
+        String(title ?? announcement.title).trim(),
+        String(content ?? announcement.content).trim(),
+        typeof is_pinned === 'boolean' ? is_pinned : announcement.is_pinned,
+        id,
+      ],
+    )
+    await logAction('announcement_updated', { id, admin: req.admin.username })
+    res.json(updated)
+  } catch {
+    res.status(500).json({ message: '更新公告失败' })
+  }
+})
+
+app.delete('/api/admin/announcements/:id', authRequired, async (req, res) => {
+  try {
+    const { id } = req.params
+    await query('DELETE FROM announcements WHERE id = $1', [id])
+    await logAction('announcement_deleted', { id, admin: req.admin.username })
+    res.json({ message: '公告已删除' })
+  } catch {
+    res.status(500).json({ message: '删除公告失败' })
   }
 })
 
