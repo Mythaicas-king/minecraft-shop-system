@@ -459,6 +459,16 @@ async function initDatabase() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `)
+  await query(`
+    CREATE TABLE IF NOT EXISTS feedbacks (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      username TEXT,
+      contact TEXT NOT NULL DEFAULT '',
+      message TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `)
 }
 
 async function ensureSeedData() {
@@ -532,6 +542,23 @@ app.get('/api/captcha', (req, res) => {
     ? String(req.query.purpose).trim()
     : 'general'
   res.json(createCaptchaChallenge(purpose))
+})
+
+app.post('/api/feedback', userAuthOptional, async (req, res) => {
+  try {
+    const { contact = '', message = '' } = req.body || {}
+    const normalizedMessage = String(message || '').trim()
+    if (!normalizedMessage) return res.status(400).json({ message: '反馈内容不能为空' })
+    if (normalizedMessage.length > 2000) return res.status(400).json({ message: '反馈内容不能超过 2000 字' })
+    await query(
+      'INSERT INTO feedbacks (user_id, username, contact, message) VALUES ($1, $2, $3, $4)',
+      [req.user?.id || null, req.user?.username || null, String(contact || '').trim(), normalizedMessage],
+    )
+    await logAction('feedback_created', { userId: req.user?.id || null, username: req.user?.username || null })
+    res.status(201).json({ message: '反馈已提交，感谢你的建议' })
+  } catch {
+    res.status(500).json({ message: '提交反馈失败' })
+  }
 })
 
 app.post('/api/auth/register', async (req, res) => {

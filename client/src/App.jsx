@@ -77,7 +77,9 @@ function App() {
       <Routes>
         <Route path="/admin/login" element={<AdminLoginPage />} />
         <Route path="/admin/*" element={<AdminShell />} />
-        <Route path="*" element={<Storefront />} />
+        <Route path="/products" element={<Storefront page="products" />} />
+        <Route path="/feedback" element={<FeedbackPage />} />
+        <Route path="*" element={<Storefront page="home" />} />
       </Routes>
     </HashRouter>
   )
@@ -100,7 +102,7 @@ function Shell({ children, title, right }) {
   )
 }
 
-function Storefront() {
+function Storefront({ page = 'home' }) {
   const [products, setProducts] = useState([])
   const [siteContent, setSiteContent] = useState(createDefaultSiteContent)
   const [searchTerm, setSearchTerm] = useState('')
@@ -339,9 +341,14 @@ function Storefront() {
 
   return (
     <Shell
-      title="商品商店"
+      title={page === 'products' ? '商品目录' : '商品商店'}
       right={
         <>
+          <nav className="site-nav">
+            <Link className={page === 'home' ? 'site-nav-link active' : 'site-nav-link'} to="/">首页</Link>
+            <Link className={page === 'products' ? 'site-nav-link active' : 'site-nav-link'} to="/products">商品目录</Link>
+            <Link className="site-nav-link" to="/feedback">反馈页</Link>
+          </nav>
           {currentUser ? (
             <>
               <span className="account-pill">{currentUser.username} · {currentUser.player_id}</span>
@@ -361,6 +368,7 @@ function Storefront() {
         </>
       }
     >
+      {page === 'home' && <>
       <section className="hero hero-home panel">
         <div className="hero-copy">
           <p className="eyebrow">{siteContent.hero_badge}</p>
@@ -471,18 +479,21 @@ function Storefront() {
           ))}
         </section>
       )}
+      </>}
 
-      <section className="section-head">
-        <div>
+      {page === 'products' && <section className="catalog-toolbar panel">
+        <div className="catalog-heading">
+          <p className="eyebrow">SHOP CATALOG</p>
           <h3>热卖商品</h3>
-          <p className="muted">点击商品查看详情，也可以直接按名称搜索。</p>
+          <p className="muted">按分类浏览商品，点击卡片查看详情；登录后即可加入购物车。</p>
         </div>
-        <div className="search-box">
-          <input placeholder="搜索商品名" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
-        </div>
-      </section>
+        <label className="catalog-search">
+          <span>搜索商品</span>
+          <input placeholder="输入商品名进行搜索" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+        </label>
+      </section>}
 
-      {groupedProducts.map((section) => (
+      {page === 'products' && groupedProducts.map((section) => (
         <section className="category-section" key={section.key}>
           <div className="section-head compact">
             <h3>{section.title}</h3>
@@ -496,7 +507,7 @@ function Storefront() {
         </section>
       ))}
 
-      {!!uncategorizedProducts.length && (
+      {page === 'products' && !!uncategorizedProducts.length && (
         <section className="category-section">
           <div className="section-head compact">
             <h3>更多商品</h3>
@@ -510,7 +521,15 @@ function Storefront() {
         </section>
       )}
 
-      <section className="query-panel panel" id="query-section">
+      {page === 'products' && !groupedProducts.length && !uncategorizedProducts.length && (
+        <section className="panel empty-state catalog-empty">
+          <strong>没有找到匹配商品</strong>
+          <p className="muted">换一个商品名试试，或者清空搜索条件。</p>
+          <button className="ghost-button" onClick={() => setSearchTerm('')}>清空搜索</button>
+        </section>
+      )}
+
+      {page === 'home' && <section className="query-panel panel" id="query-section">
         <div>
           <h3>订单查询</h3>
           <p className="muted">输入订单号或 API Key 查看状态。</p>
@@ -521,7 +540,7 @@ function Storefront() {
           <button className="primary-button" onClick={queryOrder} disabled={queryLoading}>{queryLoading ? '查询中...' : '查询'}</button>
         </div>
         {queryResult && <OrderStatusCard order={queryResult} />}
-      </section>
+      </section>}
 
       {drawerOpen && (
         <CartDrawer
@@ -892,6 +911,73 @@ function OrderStatusCard({ order }) {
 
 function CopyButton({ value, label = '复制' }) {
   return <button className="ghost-button" onClick={() => { navigator.clipboard.writeText(value); toast.success('已复制') }}>{label}</button>
+}
+
+function FeedbackPage() {
+  const [form, setForm] = useState({ contact: '', message: '' })
+  const [loading, setLoading] = useState(false)
+  const userToken = localStorage.getItem('ms_user_token') || ''
+  const user = (() => {
+    try {
+      return JSON.parse(localStorage.getItem('ms_user') || 'null')
+    } catch {
+      return null
+    }
+  })()
+
+  const submit = async (event) => {
+    event.preventDefault()
+    if (!form.message.trim()) {
+      toast.error('请填写反馈内容')
+      return
+    }
+    setLoading(true)
+    try {
+      const { data } = await api.post('/feedback', {
+        contact: form.contact.trim(),
+        message: form.message.trim(),
+      }, authHeader(userToken))
+      toast.success(data.message || '反馈已提交')
+      setForm({ contact: '', message: '' })
+    } catch (error) {
+      toast.error(error?.response?.data?.message || '提交反馈失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <Shell
+      title="意见反馈"
+      right={
+        <nav className="site-nav">
+          <Link className="site-nav-link" to="/">首页</Link>
+          <Link className="site-nav-link" to="/products">商品目录</Link>
+          <Link className="site-nav-link active" to="/feedback">反馈页</Link>
+        </nav>
+      }
+    >
+      <section className="feedback-layout">
+        <div className="panel feedback-intro">
+          <p className="eyebrow">FEEDBACK DESK</p>
+          <h2>告诉我们哪里可以做得更好</h2>
+          <p className="muted">商品建议、库存问题、订单体验或页面反馈，都可以在这里告诉管理员。</p>
+          <div className="feature-chips">
+            <span>商品建议</span>
+            <span>订单问题</span>
+            <span>页面反馈</span>
+          </div>
+          {user && <p className="account-banner">当前反馈会关联账号：{user.username}</p>}
+        </div>
+        <form className="panel form-grid feedback-form" onSubmit={submit}>
+          <h3>提交反馈</h3>
+          <label>联系方式（可选）<input value={form.contact} onChange={(e) => setForm((current) => ({ ...current, contact: e.target.value }))} placeholder="邮箱、QQ 或 Discord" /></label>
+          <label>反馈内容<textarea value={form.message} onChange={(e) => setForm((current) => ({ ...current, message: e.target.value }))} placeholder="请描述你遇到的问题或想增加的功能" /></label>
+          <button className="primary-button" disabled={loading}>{loading ? '提交中...' : '提交反馈'}</button>
+        </form>
+      </section>
+    </Shell>
+  )
 }
 
 function AdminLoginPage() {
