@@ -1,6 +1,6 @@
 # MC服务器物品商店系统
 
-一个基于 React + Express + PostgreSQL 的 Minecraft 服务器物品交易平台，支持前台下单、订单查询、后台商品管理、订单处理、多管理员账号和对象存储图片上传。
+一个基于 React + Express + PostgreSQL 的 Minecraft 服务器物品交易平台，支持前台下单、订单查询、用户注册登录、后台商品管理、订单处理、多管理员账号和对象存储图片上传。
 
 ## 技术栈
 
@@ -11,9 +11,11 @@
 
 ## 功能概览
 
-- 前台商品网格、购物车抽屉、订单提交与订单查询
-- 后台管理员登录、商品管理、订单发货/取消、管理员账号管理
+- 前台商品网格、购物车抽屉、订单提交、订单查询、用户注册登录
+- 注册与下单内置轻量算术验证码，降低脚本批量滥用风险
+- 后台管理员登录、商品管理、订单发货/取消、管理员账号管理、用户搜索与封禁
 - 自动生成 `MC-XXXXXXXX` 订单号与 `sk-xxxxxxxx` API Key
+- 已登录用户下单时会自动绑定账号名和游戏ID，后台订单可直接看到关联账号
 - 首次启动自动创建默认管理员 `admin / admin123`
 - 关键操作日志写入 `data/activity.log`
 
@@ -39,6 +41,8 @@ S3_ACCESS_KEY_ID=
 S3_SECRET_ACCESS_KEY=
 S3_PUBLIC_BASE_URL=
 S3_FORCE_PATH_STYLE=false
+ORDER_SUBMIT_COOLDOWN_MS=30000
+CAPTCHA_TTL_SECONDS=300
 ```
 
 3. 启动后端 API
@@ -58,6 +62,14 @@ npm run dev
 
 - 前端默认地址：`http://localhost:5173`
 - 后端默认地址：`http://localhost:3001`
+
+## 用户账号与验证码流程
+
+- 玩家可以在首页注册普通账号，注册时需要完成一次轻量算术验证码
+- 登录后的玩家下单会自动绑定 `username + player_id`，管理员后台订单列表能看到关联账号
+- 无论游客还是已登录用户，提交订单时都需要完成一次验证码
+- 管理员可在后台 `用户管理` 页面按账号名、游戏ID或邮箱搜索，并封禁/解除封禁账号
+- 被封禁账号无法继续登录，也无法继续通过该账号下单
 
 ## GitHub Pages 前端部署
 
@@ -107,9 +119,16 @@ PORT=10000
 JWT_SECRET=replace-with-a-long-random-string
 DATABASE_URL=postgresql://...
 CORS_ORIGIN=https://your-github-name.github.io
+ORDER_SUBMIT_COOLDOWN_MS=30000
+CAPTCHA_TTL_SECONDS=300
 ```
 
 如果你用了自定义域名，`CORS_ORIGIN` 可以写多个地址，用英文逗号分隔。
+
+说明：
+
+- `ORDER_SUBMIT_COOLDOWN_MS` 控制同一 IP + 游戏ID 的重复下单冷却时间，默认 30 秒
+- `CAPTCHA_TTL_SECONDS` 控制前台轻量验证码有效期，默认 300 秒
 
 ### 4. 可选：配置对象存储图片上传
 
@@ -139,3 +158,9 @@ S3_FORCE_PATH_STYLE=false
 - 密码：`admin123`
 
 首次登录后请尽快在后台修改密码。
+
+## 部署备注
+
+- 前端发布到 GitHub Pages 时，仍然只推送 `client/dist` 到 `gh-pages`，不要把整个 `client` 目录直接推上去
+- 如果你使用自定义域名，例如 `https://alwaysmind.xyz`，后端 `CORS_ORIGIN` 需要同时包含 GitHub Pages 域名和自定义域名
+- 新增用户账号和验证码功能后，不需要额外第三方密钥；只要后端 `JWT_SECRET` 安全可靠即可

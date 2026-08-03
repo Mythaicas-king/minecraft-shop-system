@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { HashRouter, Link, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import toast, { Toaster } from 'react-hot-toast'
-import { api, setAuthToken } from './api'
+import { api, authHeader, setAuthToken } from './api'
 import './App.css'
 
 const emptyProductForm = {
@@ -15,6 +15,14 @@ const emptyProductForm = {
 
 const emptyAdminForm = {
   username: '',
+  password: '',
+  confirmPassword: '',
+}
+
+const emptyUserAuthForm = {
+  username: '',
+  player_id: '',
+  email: '',
   password: '',
   confirmPassword: '',
 }
@@ -110,6 +118,12 @@ function Storefront() {
   const [successData, setSuccessData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [queryLoading, setQueryLoading] = useState(false)
+  const [currentUser, setCurrentUser] = useState(null)
+  const [userToken, setUserToken] = useState(() => localStorage.getItem('ms_user_token') || '')
+  const [authModalMode, setAuthModalMode] = useState('login')
+  const [authModalOpen, setAuthModalOpen] = useState(false)
+  const [userAuthForm, setUserAuthForm] = useState(emptyUserAuthForm)
+  const [userAuthLoading, setUserAuthLoading] = useState(false)
 
   useEffect(() => {
     api.get('/products').then(({ data }) => setProducts(data)).catch(() => toast.error('获取商品失败'))
@@ -117,8 +131,41 @@ function Storefront() {
   }, [])
 
   useEffect(() => {
+    if (!userToken) {
+      setCurrentUser(null)
+      return
+    }
+    api.get('/auth/me', authHeader(userToken))
+      .then(({ data }) => {
+        setCurrentUser(data.user)
+        localStorage.setItem('ms_user', JSON.stringify(data.user))
+      })
+      .catch((error) => {
+        localStorage.removeItem('ms_user_token')
+        localStorage.removeItem('ms_user')
+        setUserToken('')
+        setCurrentUser(null)
+        toast.error(error?.response?.data?.message || '账号状态已失效，请重新登录')
+      })
+  }, [userToken])
+
+  useEffect(() => {
     localStorage.setItem('ms_cart', JSON.stringify(cart))
   }, [cart])
+
+  const persistUserSession = (token, user) => {
+    localStorage.setItem('ms_user_token', token)
+    localStorage.setItem('ms_user', JSON.stringify(user))
+    setUserToken(token)
+    setCurrentUser(user)
+  }
+
+  const clearUserSession = () => {
+    localStorage.removeItem('ms_user_token')
+    localStorage.removeItem('ms_user')
+    setUserToken('')
+    setCurrentUser(null)
+  }
 
   const total = useMemo(() => cart.reduce((sum, item) => sum + item.price * item.quantity, 0), [cart])
   const totalQuantity = useMemo(() => cart.reduce((sum, item) => sum + item.quantity, 0), [cart])
@@ -182,7 +229,7 @@ function Storefront() {
   const submitOrder = async (payload) => {
     setLoading(true)
     try {
-      const { data } = await api.post('/orders', payload)
+      const { data } = await api.post('/orders', payload, authHeader(userToken))
       setSuccessData(data)
       setCart([])
       setCheckoutOpen(false)
@@ -191,6 +238,46 @@ function Storefront() {
       toast.error(error?.response?.data?.message || '提交失败')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const submitUserAuth = async (event, captcha, refreshCaptcha) => {
+    event.preventDefault()
+    const payload = {
+      username: userAuthForm.username.trim(),
+      player_id: userAuthForm.player_id.trim(),
+      email: userAuthForm.email.trim(),
+      password: userAuthForm.password,
+      captcha_token: captcha?.token || '',
+      captcha_answer: captcha?.answer?.trim() || '',
+    }
+    if (!payload.username || !payload.password || (authModalMode === 'register' && !payload.player_id)) {
+      toast.error(authModalMode === 'register' ? '请填写完整注册信息' : '请填写用户名和密码')
+      return
+    }
+    if (authModalMode === 'register' && payload.password !== userAuthForm.confirmPassword) {
+      toast.error('两次密码输入不一致')
+      return
+    }
+    if (authModalMode === 'register' && !payload.captcha_answer) {
+      toast.error('请先完成验证码')
+      return
+    }
+
+    setUserAuthLoading(true)
+    try {
+      const { data } = authModalMode === 'register'
+        ? await api.post('/auth/register', payload)
+        : await api.post('/auth/login', { username: payload.username, password: payload.password })
+      persistUserSession(data.token, data.user)
+      setAuthModalOpen(false)
+      setUserAuthForm(emptyUserAuthForm)
+      toast.success(authModalMode === 'register' ? '注册成功，已自动登录' : '登录成功')
+    } catch (error) {
+      if (authModalMode === 'register') refreshCaptcha?.()
+      toast.error(error?.response?.data?.message || (authModalMode === 'register' ? '注册失败' : '登录失败'))
+    } finally {
+      setUserAuthLoading(false)
     }
   }
 
@@ -244,8 +331,22 @@ function Storefront() {
       title="商品商店"
       right={
         <>
+          {currentUser ? (
+            <>
+              <span className="account-pill">{currentUser.username} · {currentUser.player_id}</span>
+              <button className="ghost-button" onClick={clearUserSession}>退出账号</button>
+            </>
+          ) : (
+            <>
+              <button className="ghost-button" onClick={() => { setAuthModalMode('login'); setAuthModalOpen(true) }}>用户登录</button>
+              <button className="ghost-button" onClick={() => { setAuthModalMode('register'); setAuthModalOpen(true) }}>注册账号</button>
+            </>
+          )}
           <Link className="ghost-button" to="/admin/login">管理员登录</Link>
-          <button className="cart-button" onClick={() => setDrawerOpen(true)}>购物车 {totalQuantity}</button>
+          <button className="cart-button" onClick={() => setDrawerOpen(true)}>
+            <span>购物车</span>
+            <strong>{totalQuantity}</strong>
+          </button>
         </>
       }
     >
@@ -264,6 +365,11 @@ function Storefront() {
           <div className="hero-actions">
             <button className="primary-button" onClick={() => setDrawerOpen(true)}>查看购物车</button>
             <a className="ghost-button" href="#query-section">订单查询</a>
+          </div>
+          <div className="account-banner">
+            {currentUser
+              ? `当前已登录账号：${currentUser.username}，下单将自动绑定到 ${currentUser.player_id}`
+              : '注册账号后，下单会自动绑定游戏ID，管理员也可以按账号名搜索和封禁。'}
           </div>
         </div>
         <div className="hero-stage">
@@ -425,11 +531,24 @@ function Storefront() {
           onSubmit={submitOrder}
           cart={cart}
           total={total}
+          currentUser={currentUser}
         />
       )}
 
       {selectedProduct && (
         <ProductDetailModal product={selectedProduct} onAdd={addToCart} onClose={() => setSelectedProduct(null)} />
+      )}
+
+      {authModalOpen && (
+        <UserAuthModal
+          form={userAuthForm}
+          loading={userAuthLoading}
+          mode={authModalMode}
+          onChange={setUserAuthForm}
+          onClose={() => setAuthModalOpen(false)}
+          onModeChange={setAuthModalMode}
+          onSubmit={submitUserAuth}
+        />
       )}
     </Shell>
   )
@@ -564,19 +683,50 @@ function CartDrawer({ cart, total, onClose, onAdjust, onCheckout, onRemove, onCl
   )
 }
 
-function CheckoutModal({ loading, onClose, onSubmit, cart, total }) {
-  const [form, setForm] = useState({ player_id: '', note: '', email: '' })
+function CheckoutModal({ currentUser, loading, onClose, onSubmit, cart, total }) {
+  const [form, setForm] = useState({ player_id: currentUser?.player_id || '', note: '', email: currentUser?.email || '' })
+  const [captcha, setCaptcha] = useState({ token: '', prompt: '', answer: '', expires_in: 0, loading: false })
+
+  useEffect(() => {
+    setForm((current) => ({
+      ...current,
+      player_id: currentUser?.player_id || current.player_id,
+      email: currentUser?.email || current.email,
+    }))
+  }, [currentUser])
+
+  const loadCaptcha = async () => {
+    setCaptcha((current) => ({ ...current, loading: true }))
+    try {
+      const { data } = await api.get('/captcha', { params: { purpose: 'order' } })
+      setCaptcha({ ...data, answer: '', loading: false })
+    } catch {
+      setCaptcha((current) => ({ ...current, loading: false }))
+      toast.error('验证码加载失败')
+    }
+  }
+
+  useEffect(() => {
+    loadCaptcha()
+  }, [])
 
   const handleSubmit = (e) => {
     e.preventDefault()
-    if (!form.player_id.trim()) {
+    const effectivePlayerId = currentUser?.player_id || form.player_id.trim()
+    if (!effectivePlayerId) {
       toast.error('游戏ID不能为空')
       return
     }
+    if (!captcha.answer.trim()) {
+      toast.error('请先完成验证码')
+      return
+    }
     onSubmit({
-      player_id: form.player_id.trim(),
+      player_id: effectivePlayerId,
       note: form.note.trim(),
       email: form.email.trim(),
+      captcha_token: captcha.token,
+      captcha_answer: captcha.answer.trim(),
       items: cart.map((item) => ({ product_id: item.id, quantity: item.quantity })),
     })
   }
@@ -589,8 +739,9 @@ function CheckoutModal({ loading, onClose, onSubmit, cart, total }) {
         </div>
         <label>
           游戏ID
-          <input value={form.player_id} onChange={(e) => setForm((s) => ({ ...s, player_id: e.target.value }))} />
+          <input value={currentUser?.player_id || form.player_id} disabled={Boolean(currentUser)} onChange={(e) => setForm((s) => ({ ...s, player_id: e.target.value }))} />
         </label>
+        {currentUser && <p className="muted">当前账号已绑定游戏ID，如需修改请先联系管理员处理。</p>}
         <label>
           自定义备注 / 物资需求说明
           <textarea value={form.note} onChange={(e) => setForm((s) => ({ ...s, note: e.target.value }))} />
@@ -599,12 +750,106 @@ function CheckoutModal({ loading, onClose, onSubmit, cart, total }) {
           联系邮箱
           <input type="email" value={form.email} onChange={(e) => setForm((s) => ({ ...s, email: e.target.value }))} />
         </label>
+        <CaptchaField
+          answer={captcha.answer}
+          loading={captcha.loading}
+          prompt={captcha.prompt}
+          onAnswerChange={(value) => setCaptcha((current) => ({ ...current, answer: value }))}
+          onRefresh={loadCaptcha}
+        />
         <div className="drawer-foot stretch">
           <strong>应付：{total} 金币</strong>
           <button className="primary-button" disabled={loading}>{loading ? '提交中...' : '提交订单'}</button>
         </div>
       </form>
     </ModalFrame>
+  )
+}
+
+function UserAuthModal({ form, loading, mode, onChange, onClose, onModeChange, onSubmit }) {
+  const [captcha, setCaptcha] = useState({ token: '', prompt: '', answer: '', expires_in: 0, loading: false })
+
+  const loadCaptcha = async () => {
+    setCaptcha((current) => ({ ...current, loading: true }))
+    try {
+      const { data } = await api.get('/captcha', { params: { purpose: 'register' } })
+      setCaptcha({ ...data, answer: '', loading: false })
+    } catch {
+      setCaptcha((current) => ({ ...current, loading: false }))
+      toast.error('验证码加载失败')
+    }
+  }
+
+  useEffect(() => {
+    if (mode === 'register') loadCaptcha()
+  }, [mode])
+
+  return (
+    <ModalFrame title={mode === 'register' ? '注册账号' : '用户登录'} onClose={onClose}>
+      <form className="form-grid" onSubmit={(event) => onSubmit(event, captcha, loadCaptcha)}>
+        <div className="segmented-toggle">
+          <button type="button" className={mode === 'login' ? 'nav-item active' : 'nav-item'} onClick={() => onModeChange('login')}>登录</button>
+          <button type="button" className={mode === 'register' ? 'nav-item active' : 'nav-item'} onClick={() => onModeChange('register')}>注册</button>
+        </div>
+        <label>
+          账号名
+          <input value={form.username} onChange={(e) => onChange((current) => ({ ...current, username: e.target.value }))} />
+        </label>
+        {mode === 'register' && (
+          <label>
+            绑定游戏ID
+            <input value={form.player_id} onChange={(e) => onChange((current) => ({ ...current, player_id: e.target.value }))} />
+          </label>
+        )}
+        {mode === 'register' && (
+          <label>
+            联系邮箱
+            <input type="email" value={form.email} onChange={(e) => onChange((current) => ({ ...current, email: e.target.value }))} />
+          </label>
+        )}
+        <label>
+          密码
+          <input type="password" value={form.password} onChange={(e) => onChange((current) => ({ ...current, password: e.target.value }))} />
+        </label>
+        {mode === 'register' && (
+          <label>
+            确认密码
+            <input type="password" value={form.confirmPassword} onChange={(e) => onChange((current) => ({ ...current, confirmPassword: e.target.value }))} />
+          </label>
+        )}
+        {mode === 'register' && (
+          <CaptchaField
+            answer={captcha.answer}
+            loading={captcha.loading}
+            prompt={captcha.prompt}
+            onAnswerChange={(value) => setCaptcha((current) => ({ ...current, answer: value }))}
+            onRefresh={loadCaptcha}
+          />
+        )}
+        <div className="button-group">
+          <button type="button" className="ghost-button" onClick={onClose}>取消</button>
+          <button className="primary-button" disabled={loading}>{loading ? '提交中...' : mode === 'register' ? '创建账号' : '立即登录'}</button>
+        </div>
+      </form>
+    </ModalFrame>
+  )
+}
+
+function CaptchaField({ answer, loading, prompt, onAnswerChange, onRefresh }) {
+  return (
+    <div className="captcha-block">
+      <div className="captcha-head">
+        <strong>人机校验</strong>
+        <button type="button" className="ghost-button small" onClick={onRefresh} disabled={loading}>{loading ? '加载中...' : '刷新验证码'}</button>
+      </div>
+      <label>
+        请输入结果
+        <div className="captcha-row">
+          <div className="captcha-prompt">{prompt || '加载中...'}</div>
+          <input value={answer} onChange={(e) => onAnswerChange(e.target.value)} placeholder="填写答案" />
+        </div>
+      </label>
+    </div>
   )
 }
 
@@ -623,7 +868,7 @@ function OrderStatusCard({ order }) {
         {order.items.map((item) => <span key={`${order.order_number}-${item.product_id}`}>{item.name} x{item.quantity}</span>)}
       </div>
       {order.note && <p className="muted"><strong>备注：</strong>{order.note}</p>}
-      {order.status === 'shipped' && <pre>{order.shipping_instruction}</pre>}
+      {order.status === 'shipped' && <p className="muted shipped-note">管理员已完成发货，请回到服务器内查收。</p>}
     </div>
   )
 }
@@ -676,8 +921,10 @@ function AdminShell() {
   const [products, setProducts] = useState([])
   const [orders, setOrders] = useState([])
   const [admins, setAdmins] = useState([])
+  const [users, setUsers] = useState([])
   const [siteContentForm, setSiteContentForm] = useState(createDefaultSiteContent)
   const [statusFilter, setStatusFilter] = useState('all')
+  const [userSearch, setUserSearch] = useState('')
   const [productForm, setProductForm] = useState(emptyProductForm)
   const [editingProductId, setEditingProductId] = useState(null)
   const [imageUploading, setImageUploading] = useState(false)
@@ -687,6 +934,7 @@ function AdminShell() {
   const [adminForm, setAdminForm] = useState(emptyAdminForm)
   const [adminModalOpen, setAdminModalOpen] = useState(false)
   const [passwordModal, setPasswordModal] = useState({ open: false, id: null, password: '', confirmPassword: '' })
+  const [banModal, setBanModal] = useState({ open: false, user: null, reason: '', nextStatus: true })
 
   useEffect(() => {
     const token = localStorage.getItem('ms_token')
@@ -715,6 +963,12 @@ function AdminShell() {
     setAdmins(data)
   }
 
+  const loadUsers = async (search = userSearch) => {
+    const keyword = search.trim()
+    const { data } = await api.get('/admin/users', { params: keyword ? { search: keyword } : {} })
+    setUsers(data)
+  }
+
   const loadSiteContent = async () => {
     const { data } = await api.get('/admin/site-content')
     setSiteContentForm({ ...createDefaultSiteContent(), ...data })
@@ -725,6 +979,7 @@ function AdminShell() {
     if (section === 'orders') loadOrders().catch(() => toast.error('加载订单失败'))
     if (section === 'products') loadProducts().catch(() => toast.error('加载商品失败'))
     if (section === 'admins') loadAdmins().catch(() => toast.error('加载管理员失败'))
+    if (section === 'users') loadUsers().catch(() => toast.error('加载用户失败'))
     if (section === 'content') {
       loadSiteContent().catch(() => toast.error('加载页面内容失败'))
       loadProducts().catch(() => toast.error('加载商品失败'))
@@ -738,7 +993,7 @@ function AdminShell() {
 
   useEffect(() => {
     const path = location.pathname.split('/').at(-1)
-    if (['orders', 'products', 'admins', 'content'].includes(path)) setSection(path)
+    if (['orders', 'products', 'users', 'admins', 'content'].includes(path)) setSection(path)
   }, [location.pathname])
 
   if (!tokenReady) return null
@@ -883,6 +1138,18 @@ function AdminShell() {
     loadAdmins()
   }
 
+  const submitUserBan = async (event) => {
+    event?.preventDefault?.()
+    if (!banModal.user) return
+    await api.put(`/admin/users/${banModal.user.id}/ban`, {
+      is_banned: banModal.nextStatus,
+      banned_reason: banModal.reason.trim(),
+    })
+    toast.success(banModal.nextStatus ? '账号已封禁' : '账号已解除封禁')
+    setBanModal({ open: false, user: null, reason: '', nextStatus: true })
+    loadUsers()
+  }
+
   return (
     <Shell
       title="后台管理面板"
@@ -892,6 +1159,7 @@ function AdminShell() {
         <aside className="sidebar panel">
           <button className={section === 'orders' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/orders')}>订单管理</button>
           <button className={section === 'products' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/products')}>商品管理</button>
+          <button className={section === 'users' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/users')}>用户管理</button>
           <button className={section === 'content' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/content')}>内容管理</button>
           <button className={section === 'admins' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/admins')}>管理员管理</button>
         </aside>
@@ -901,7 +1169,7 @@ function AdminShell() {
               <div className="section-toolbar wrap">
                 <div>
                   <h3>订单管理</h3>
-                  <p className="muted">按状态筛选，支持复制指令、发货和取消订单。</p>
+                  <p className="muted">按状态筛选订单，查看关联账号，并执行发货或取消操作。</p>
                 </div>
                 <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
                   <option value="all">全部</option>
@@ -913,19 +1181,19 @@ function AdminShell() {
               <div className="table-wrap">
                 <table>
                   <thead>
-                    <tr><th>订单号</th><th>游戏ID</th><th>商品</th><th>总价</th><th>状态</th><th>提交时间</th><th>操作</th></tr>
+                    <tr><th>订单号</th><th>关联账号</th><th>游戏ID</th><th>商品</th><th>总价</th><th>状态</th><th>提交时间</th><th>操作</th></tr>
                   </thead>
                   <tbody>
                     {orders.map((order) => (
                       <tr key={order.order_number}>
                         <td>{order.order_number}</td>
+                        <td>{order.account_username || '-'}</td>
                         <td>{order.player_id}</td>
                         <td>{order.items.map((item) => `${item.name} x${item.quantity}`).join('，')}</td>
                         <td>{order.total_price}</td>
                         <td><span className={`status-pill ${orderStatusLabels[order.status].className}`}>{orderStatusLabels[order.status].text}</span></td>
                         <td>{formatTime(order.created_at)}</td>
                         <td className="row-actions">
-                          <button onClick={() => navigator.clipboard.writeText(order.shipping_instruction || `/give ${order.player_id} diamond 64\n/money pay ${order.player_id} ${order.total_price}`)}>复制发放指令</button>
                           <button disabled={order.status !== 'pending'} onClick={() => { setShipTarget(order); setShippingInstruction(`/give ${order.player_id} diamond 64\n/money pay ${order.player_id} ${order.total_price}`) }}>标记已发货</button>
                           <button disabled={order.status !== 'pending'} onClick={() => setConfirmAction({ title: '取消订单', message: `确认取消订单 ${order.order_number} 吗？`, onConfirm: () => cancelOrder(order.order_number) })}>取消订单</button>
                         </td>
@@ -1072,6 +1340,49 @@ function AdminShell() {
               </div>
             </section>
           )}
+
+          {section === 'users' && (
+            <section className="panel">
+              <div className="section-toolbar wrap">
+                <div>
+                  <h3>用户管理</h3>
+                  <p className="muted">支持按账号名、游戏ID或邮箱搜索，并可快速封禁或解除封禁。</p>
+                </div>
+                <form className="search-inline" onSubmit={(e) => { e.preventDefault(); loadUsers() }}>
+                  <input placeholder="搜索账号 / 游戏ID / 邮箱" value={userSearch} onChange={(e) => setUserSearch(e.target.value)} />
+                  <button className="primary-button">搜索</button>
+                </form>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead><tr><th>账号名</th><th>游戏ID</th><th>邮箱</th><th>状态</th><th>最近登录</th><th>操作</th></tr></thead>
+                  <tbody>
+                    {users.map((item) => (
+                      <tr key={item.id}>
+                        <td>{item.username}</td>
+                        <td>{item.player_id}</td>
+                        <td>{item.email || '-'}</td>
+                        <td>
+                          <div className="user-status-cell">
+                            <span className={`status-pill ${item.is_banned ? 'badge-danger' : 'badge-success'}`}>{item.is_banned ? '已封禁' : '正常'}</span>
+                            {item.banned_reason && <span className="muted tiny-text">{item.banned_reason}</span>}
+                          </div>
+                        </td>
+                        <td>{formatTime(item.last_login_at)}</td>
+                        <td className="row-actions">
+                          {item.is_banned ? (
+                            <button onClick={() => setBanModal({ open: true, user: item, reason: '', nextStatus: false })}>解除封禁</button>
+                          ) : (
+                            <button onClick={() => setBanModal({ open: true, user: item, reason: '', nextStatus: true })}>封禁账号</button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
         </main>
       </div>
 
@@ -1122,6 +1433,26 @@ function AdminShell() {
             <div className="button-group">
               <button type="button" className="ghost-button" onClick={() => setPasswordModal({ open: false, id: null, password: '', confirmPassword: '' })}>取消</button>
               <button className="primary-button">保存密码</button>
+            </div>
+          </form>
+        </ModalFrame>
+      )}
+
+      {banModal.open && banModal.user && (
+        <ModalFrame title={banModal.nextStatus ? `封禁：${banModal.user.username}` : `解除封禁：${banModal.user.username}`} onClose={() => setBanModal({ open: false, user: null, reason: '', nextStatus: true })}>
+          <form className="form-grid" onSubmit={submitUserBan}>
+            <p className="muted">
+              {banModal.nextStatus
+                ? `封禁后，账号 ${banModal.user.username} 将无法继续登录和提交订单。`
+                : `解除封禁后，账号 ${banModal.user.username} 可以重新登录和下单。`}
+            </p>
+            <label>
+              {banModal.nextStatus ? '封禁原因' : '备注'}
+              <textarea value={banModal.reason} onChange={(e) => setBanModal((current) => ({ ...current, reason: e.target.value }))} placeholder={banModal.nextStatus ? '例如：恶意刷单、违规下单' : '可选，留空则不记录'} />
+            </label>
+            <div className="button-group">
+              <button type="button" className="ghost-button" onClick={() => setBanModal({ open: false, user: null, reason: '', nextStatus: true })}>取消</button>
+              <button className="primary-button">确认{banModal.nextStatus ? '封禁' : '解除封禁'}</button>
             </div>
           </form>
         </ModalFrame>

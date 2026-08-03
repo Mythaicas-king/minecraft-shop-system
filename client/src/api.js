@@ -23,3 +23,7 @@ export function setAuthToken(token) {
     delete api.defaults.headers.common.Authorization
   }
 }
+
+export function authHeader(token) {
+  return token ? { headers: { Authorization: `Bearer ${token}` } } : {}
+}

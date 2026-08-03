@@ -27,6 +27,10 @@ const S3_ACCESS_KEY_ID = process.env.S3_ACCESS_KEY_ID || ''
 const S3_SECRET_ACCESS_KEY = process.env.S3_SECRET_ACCESS_KEY || ''
 const S3_PUBLIC_BASE_URL = process.env.S3_PUBLIC_BASE_URL || ''
 const S3_FORCE_PATH_STYLE = process.env.S3_FORCE_PATH_STYLE === 'true'
+const ORDER_SUBMIT_COOLDOWN_MS = Number(process.env.ORDER_SUBMIT_COOLDOWN_MS || 30000)
+const CAPTCHA_TTL_SECONDS = Number(process.env.CAPTCHA_TTL_SECONDS || 300)
+
+const orderSubmitCooldowns = new Map()
 
 if (!DATABASE_URL) {
   throw new Error('DATABASE_URL is required. Copy .env.example to .env and set PostgreSQL connection info.')
@@ -115,6 +119,31 @@ function normalizeSiteContent(row) {
   return row?.content || defaultSiteContent()
 }
 
+function getRequestIp(req) {
+  const forwarded = req.headers['x-forwarded-for']
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    return forwarded.split(',')[0].trim()
+  }
+  return req.ip || req.socket?.remoteAddress || 'unknown'
+}
+
+function assertOrderSubmitAllowed(req, playerId) {
+  const key = `${getRequestIp(req)}:${String(playerId).trim().toLowerCase()}`
+  const now = Date.now()
+  const lastTime = orderSubmitCooldowns.get(key) || 0
+  if (now - lastTime < ORDER_SUBMIT_COOLDOWN_MS) {
+    const retryAfter = Math.ceil((ORDER_SUBMIT_COOLDOWN_MS - (now - lastTime)) / 1000)
+    return { allowed: false, retryAfter }
+  }
+  orderSubmitCooldowns.set(key, now)
+  if (orderSubmitCooldowns.size > 1000) {
+    for (const [entryKey, timestamp] of orderSubmitCooldowns.entries()) {
+      if (now - timestamp > ORDER_SUBMIT_COOLDOWN_MS * 10) orderSubmitCooldowns.delete(entryKey)
+    }
+  }
+  return { allowed: true }
+}
+
 function buildObjectStorageUrl(key) {
   if (S3_PUBLIC_BASE_URL) {
     return `${S3_PUBLIC_BASE_URL.replace(/\/$/, '')}/${key}`
@@ -184,20 +213,78 @@ function generateApiKey() {
   return `sk-${randomFrom('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789', 32)}`
 }
 
-function createToken(admin) {
-  return jwt.sign({ id: admin.id, username: admin.username }, JWT_SECRET, { expiresIn: '12h' })
+function createAdminToken(admin) {
+  return jwt.sign({ role: 'admin', id: admin.id, username: admin.username }, JWT_SECRET, { expiresIn: '12h' })
+}
+
+function createUserToken(user) {
+  return jwt.sign({ role: 'user', id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '30d' })
+}
+
+function createCaptchaChallenge(purpose = 'general') {
+  const left = crypto.randomInt(2, 10)
+  const right = crypto.randomInt(1, 10)
+  const operator = crypto.randomInt(0, 2) === 0 ? '+' : '-'
+  const answer = operator === '+' ? left + right : left - right
+  const token = jwt.sign({ role: 'captcha', purpose, answer }, JWT_SECRET, { expiresIn: `${CAPTCHA_TTL_SECONDS}s` })
+  return {
+    token,
+    prompt: `${left} ${operator} ${right} = ?`,
+    expires_in: CAPTCHA_TTL_SECONDS,
+  }
+}
+
+function verifyCaptchaResponse(token, answer, purpose) {
+  if (!token || answer === undefined || answer === null) return false
+  try {
+    const payload = jwt.verify(String(token), JWT_SECRET)
+    if (payload.role !== 'captcha' || payload.purpose !== purpose) return false
+    return String(payload.answer) === String(answer).trim()
+  } catch {
+    return false
+  }
+}
+
+function getBearerToken(req) {
+  const header = req.headers.authorization || ''
+  const [, token] = header.split(' ')
+  return token || ''
 }
 
 function authRequired(req, res, next) {
-  const header = req.headers.authorization || ''
-  const [, token] = header.split(' ')
+  const token = getBearerToken(req)
   if (!token) return res.status(401).json({ message: '未登录或Token缺失' })
   try {
-    req.admin = jwt.verify(token, JWT_SECRET)
+    const payload = jwt.verify(token, JWT_SECRET)
+    if (payload.role !== 'admin') return res.status(401).json({ message: '管理员Token无效' })
+    req.admin = payload
     return next()
   } catch {
     return res.status(401).json({ message: 'Token无效或已过期' })
   }
+}
+
+async function userAuthOptional(req, res, next) {
+  const token = getBearerToken(req)
+  if (!token) return next()
+  try {
+    const payload = jwt.verify(token, JWT_SECRET)
+    if (payload.role !== 'user') return res.status(401).json({ message: '用户Token无效' })
+    const user = await getRow('SELECT * FROM users WHERE id = $1', [payload.id])
+    if (!user) return res.status(401).json({ message: '用户不存在或登录已失效' })
+    if (user.is_banned) return res.status(403).json({ message: user.banned_reason || '账号已被封禁，请联系管理员' })
+    req.user = user
+    return next()
+  } catch {
+    return res.status(401).json({ message: '用户登录已失效，请重新登录' })
+  }
+}
+
+async function userAuthRequired(req, res, next) {
+  await userAuthOptional(req, res, () => {})
+  if (res.headersSent) return
+  if (!req.user) return res.status(401).json({ message: '请先登录账号' })
+  return next()
 }
 
 function normalizeProduct(row) {
@@ -224,9 +311,24 @@ function normalizeOrder(row) {
     status: row.status,
     note: row.note,
     email: row.email,
+    user_id: row.user_id,
+    account_username: row.account_username,
     shipping_instruction: row.shipping_instruction,
     created_at: row.created_at,
     processed_at: row.processed_at,
+  }
+}
+
+function normalizeUser(row) {
+  return {
+    id: row.id,
+    username: row.username,
+    player_id: row.player_id,
+    email: row.email,
+    is_banned: row.is_banned,
+    banned_reason: row.banned_reason,
+    created_at: row.created_at,
+    last_login_at: row.last_login_at,
   }
 }
 
@@ -253,10 +355,25 @@ async function initDatabase() {
   `)
   await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT '热门补给'`)
   await query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      username TEXT UNIQUE NOT NULL,
+      player_id TEXT UNIQUE NOT NULL,
+      email TEXT NOT NULL DEFAULT '',
+      password_hash TEXT NOT NULL,
+      is_banned BOOLEAN NOT NULL DEFAULT FALSE,
+      banned_reason TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_login_at TIMESTAMPTZ
+    )
+  `)
+  await query(`
     CREATE TABLE IF NOT EXISTS orders (
       id SERIAL PRIMARY KEY,
       order_number TEXT UNIQUE NOT NULL,
       api_key TEXT UNIQUE NOT NULL,
+      user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      account_username TEXT,
       player_id TEXT NOT NULL,
       items JSONB NOT NULL,
       total_price INTEGER NOT NULL,
@@ -268,6 +385,8 @@ async function initDatabase() {
       processed_at TIMESTAMPTZ
     )
   `)
+  await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE SET NULL')
+  await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS account_username TEXT')
   await query(`
     CREATE TABLE IF NOT EXISTS activity_logs (
       id SERIAL PRIMARY KEY,
@@ -341,6 +460,79 @@ app.get('/api/site-content', async (req, res) => {
   }
 })
 
+app.get('/api/captcha', (req, res) => {
+  const purpose = ['register', 'order'].includes(String(req.query.purpose || '').trim())
+    ? String(req.query.purpose).trim()
+    : 'general'
+  res.json(createCaptchaChallenge(purpose))
+})
+
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { username, player_id, password, email = '', captcha_token, captcha_answer } = req.body || {}
+    const normalizedUsername = String(username || '').trim()
+    const normalizedPlayerId = String(player_id || '').trim()
+    const normalizedEmail = String(email || '').trim()
+    if (!normalizedUsername || !normalizedPlayerId || !password) {
+      return res.status(400).json({ message: '用户名、游戏ID和密码不能为空' })
+    }
+    if (String(password).length < 6) return res.status(400).json({ message: '密码至少需要 6 位' })
+    if (!verifyCaptchaResponse(captcha_token, captcha_answer, 'register')) {
+      return res.status(400).json({ message: '验证码错误或已过期，请刷新后重试' })
+    }
+
+    const usernameExists = await getRow('SELECT 1 FROM users WHERE LOWER(username) = LOWER($1)', [normalizedUsername])
+    if (usernameExists) return res.status(400).json({ message: '用户名已存在' })
+    const playerIdExists = await getRow('SELECT 1 FROM users WHERE LOWER(player_id) = LOWER($1)', [normalizedPlayerId])
+    if (playerIdExists) return res.status(400).json({ message: '该游戏ID已绑定账号' })
+
+    const hash = await bcrypt.hash(password, 10)
+    const created = await getRow(
+      `INSERT INTO users (username, player_id, email, password_hash)
+       VALUES ($1, $2, $3, $4)
+       RETURNING *`,
+      [normalizedUsername, normalizedPlayerId, normalizedEmail, hash],
+    )
+    const token = createUserToken(created)
+    await logAction('user_registered', { id: created.id, username: created.username, playerId: created.player_id })
+    res.status(201).json({ token, user: normalizeUser(created) })
+  } catch {
+    res.status(500).json({ message: '注册失败' })
+  }
+})
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { username, password } = req.body || {}
+    const normalizedUsername = String(username || '').trim()
+    if (!normalizedUsername || !password) return res.status(400).json({ message: '用户名和密码不能为空' })
+
+    const user = await getRow('SELECT * FROM users WHERE LOWER(username) = LOWER($1)', [normalizedUsername])
+    if (!user) {
+      await logAction('user_login_failed', { username: normalizedUsername })
+      return res.status(401).json({ message: '用户名或密码错误' })
+    }
+    if (user.is_banned) return res.status(403).json({ message: user.banned_reason || '账号已被封禁，请联系管理员' })
+
+    const ok = await bcrypt.compare(password, user.password_hash)
+    if (!ok) {
+      await logAction('user_login_failed', { username: normalizedUsername })
+      return res.status(401).json({ message: '用户名或密码错误' })
+    }
+
+    const updated = await getRow('UPDATE users SET last_login_at = NOW() WHERE id = $1 RETURNING *', [user.id])
+    const token = createUserToken(updated)
+    await logAction('user_login_success', { id: updated.id, username: updated.username })
+    res.json({ token, user: normalizeUser(updated) })
+  } catch {
+    res.status(500).json({ message: '登录失败' })
+  }
+})
+
+app.get('/api/auth/me', userAuthRequired, async (req, res) => {
+  res.json({ user: normalizeUser(req.user) })
+})
+
 app.post('/api/admin/uploads', authRequired, upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: '未上传文件' })
@@ -356,11 +548,22 @@ app.post('/api/admin/uploads', authRequired, upload.single('image'), async (req,
   }
 })
 
-app.post('/api/orders', async (req, res) => {
+app.post('/api/orders', userAuthOptional, async (req, res) => {
   try {
-    const { player_id, items, note = '', email = '' } = req.body || {}
-    if (!player_id || !String(player_id).trim()) return res.status(400).json({ message: '游戏ID不能为空' })
+    const { player_id, items, note = '', email = '', captcha_token, captcha_answer } = req.body || {}
+    const activeUser = req.user || null
+    const normalizedPlayerId = activeUser ? String(activeUser.player_id).trim() : String(player_id || '').trim()
+    const normalizedEmail = String(email || '').trim()
+    if (!normalizedPlayerId) return res.status(400).json({ message: '游戏ID不能为空' })
     if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ message: '订单商品不能为空' })
+    if (!verifyCaptchaResponse(captcha_token, captcha_answer, 'order')) {
+      return res.status(400).json({ message: '验证码错误或已过期，请刷新后重试' })
+    }
+
+    const submitCheck = assertOrderSubmitAllowed(req, normalizedPlayerId)
+    if (!submitCheck.allowed) {
+      return res.status(429).json({ message: `提交过于频繁，请 ${submitCheck.retryAfter} 秒后再试` })
+    }
 
     const productIds = [...new Set(items.map((item) => Number(item.product_id)).filter(Boolean))]
     const products = productIds.length
@@ -388,21 +591,39 @@ app.post('/api/orders', async (req, res) => {
 
     await query(
       `INSERT INTO orders
-      (order_number, api_key, player_id, items, total_price, status, note, email)
-      VALUES ($1, $2, $3, $4::jsonb, $5, 'pending', $6, $7)`,
-      [orderNumber, apiKey, String(player_id).trim(), JSON.stringify(normalizedItems), totalPrice, String(note || ''), String(email || '')],
+      (order_number, api_key, user_id, account_username, player_id, items, total_price, status, note, email)
+      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'pending', $8, $9)`,
+      [
+        orderNumber,
+        apiKey,
+        activeUser?.id || null,
+        activeUser?.username || null,
+        normalizedPlayerId,
+        JSON.stringify(normalizedItems),
+        totalPrice,
+        String(note || ''),
+        activeUser?.email || normalizedEmail,
+      ],
     )
 
-    await logAction('order_created', { orderNumber, playerId: String(player_id).trim(), totalPrice })
+    await logAction('order_created', {
+      orderNumber,
+      playerId: normalizedPlayerId,
+      totalPrice,
+      userId: activeUser?.id || null,
+      username: activeUser?.username || null,
+    })
 
     res.status(201).json({
       order_number: orderNumber,
       api_key: apiKey,
-      player_id: String(player_id).trim(),
+      user_id: activeUser?.id || null,
+      account_username: activeUser?.username || null,
+      player_id: normalizedPlayerId,
       items: normalizedItems,
       total_price: totalPrice,
       note: String(note || ''),
-      email: String(email || ''),
+      email: activeUser?.email || normalizedEmail,
       status: 'pending',
     })
   } catch {
@@ -436,7 +657,7 @@ app.post('/api/admin/login', async (req, res) => {
       await logAction('admin_login_failed', { username })
       return res.status(401).json({ message: '用户名或密码错误' })
     }
-    const token = createToken(admin)
+    const token = createAdminToken(admin)
     await logAction('admin_login_success', { username })
     res.json({ token, admin: { id: admin.id, username: admin.username } })
   } catch {
@@ -606,6 +827,55 @@ app.get('/api/admin/admins', authRequired, async (req, res) => {
     res.json(rows)
   } catch {
     res.status(500).json({ message: '获取管理员失败' })
+  }
+})
+
+app.get('/api/admin/users', authRequired, async (req, res) => {
+  try {
+    const search = String(req.query.search || '').trim()
+    const rows = search
+      ? await getRows(
+        `SELECT id, username, player_id, email, is_banned, banned_reason, created_at, last_login_at
+         FROM users
+         WHERE username ILIKE $1 OR player_id ILIKE $1 OR email ILIKE $1
+         ORDER BY created_at DESC, id DESC`,
+        [`%${search}%`],
+      )
+      : await getRows(
+        `SELECT id, username, player_id, email, is_banned, banned_reason, created_at, last_login_at
+         FROM users
+         ORDER BY created_at DESC, id DESC
+         LIMIT 100`,
+      )
+    res.json(rows)
+  } catch {
+    res.status(500).json({ message: '获取用户失败' })
+  }
+})
+
+app.put('/api/admin/users/:id/ban', authRequired, async (req, res) => {
+  try {
+    const { id } = req.params
+    const { is_banned, banned_reason = '' } = req.body || {}
+    if (typeof is_banned !== 'boolean') return res.status(400).json({ message: '请提供正确的封禁状态' })
+    const user = await getRow('SELECT * FROM users WHERE id = $1', [id])
+    if (!user) return res.status(404).json({ message: '用户不存在' })
+    const updated = await getRow(
+      `UPDATE users
+       SET is_banned = $1, banned_reason = $2
+       WHERE id = $3
+       RETURNING id, username, player_id, email, is_banned, banned_reason, created_at, last_login_at`,
+      [is_banned, is_banned ? String(banned_reason || '').trim() : '', id],
+    )
+    await logAction(is_banned ? 'user_banned' : 'user_unbanned', {
+      id: updated.id,
+      username: updated.username,
+      admin: req.admin.username,
+      reason: updated.banned_reason,
+    })
+    res.json(updated)
+  } catch {
+    res.status(500).json({ message: '更新封禁状态失败' })
   }
 })
 
