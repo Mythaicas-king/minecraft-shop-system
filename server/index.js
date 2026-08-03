@@ -1588,19 +1588,23 @@ app.get('/api/admin/users', authRequired, async (req, res) => {
     const search = String(req.query.search || '').trim()
     const rows = search
       ? await getRows(
-        `SELECT id, username, player_id, email, invite_code, member_tier, member_balance, total_recharge, is_banned, banned_reason, created_at, last_login_at
+        `SELECT id, username, player_id, email, invite_code, member_tier, member_balance, total_recharge,
+                is_merchant, store_name, store_description, store_notice, store_balance, last_store_checkin_at,
+                is_banned, banned_reason, created_at, last_login_at
          FROM users
          WHERE username ILIKE $1 OR player_id ILIKE $1 OR email ILIKE $1 OR invite_code ILIKE $1 OR member_tier ILIKE $1
          ORDER BY created_at DESC, id DESC`,
         [`%${search}%`],
       )
       : await getRows(
-        `SELECT id, username, player_id, email, invite_code, member_tier, member_balance, total_recharge, is_banned, banned_reason, created_at, last_login_at
+        `SELECT id, username, player_id, email, invite_code, member_tier, member_balance, total_recharge,
+                is_merchant, store_name, store_description, store_notice, store_balance, last_store_checkin_at,
+                is_banned, banned_reason, created_at, last_login_at
          FROM users
          ORDER BY created_at DESC, id DESC
          LIMIT 100`,
       )
-    res.json(rows)
+    res.json(rows.map(normalizeUser))
   } catch {
     res.status(500).json({ message: '获取用户失败' })
   }
@@ -1617,7 +1621,7 @@ app.put('/api/admin/users/:id/ban', authRequired, async (req, res) => {
       `UPDATE users
        SET is_banned = $1, banned_reason = $2
        WHERE id = $3
-       RETURNING id, username, player_id, email, invite_code, member_tier, member_balance, total_recharge, is_banned, banned_reason, created_at, last_login_at`,
+       RETURNING *`,
       [is_banned, is_banned ? String(banned_reason || '').trim() : '', id],
     )
     await logAction(is_banned ? 'user_banned' : 'user_unbanned', {
@@ -1626,7 +1630,7 @@ app.put('/api/admin/users/:id/ban', authRequired, async (req, res) => {
       admin: req.admin.username,
       reason: updated.banned_reason,
     })
-    res.json(updated)
+    res.json(normalizeUser(updated))
   } catch {
     res.status(500).json({ message: '更新封禁状态失败' })
   }
