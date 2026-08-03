@@ -7,6 +7,7 @@ const dotenv = require('dotenv')
 const jwt = require('jsonwebtoken')
 const bcrypt = require('bcryptjs')
 const morgan = require('morgan')
+const multer = require('multer')
 const { Pool } = require('pg')
 
 dotenv.config()
@@ -16,6 +17,7 @@ const PORT = Number(process.env.PORT || 3001)
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me'
 const DATABASE_URL = process.env.DATABASE_URL
 const LOG_PATH = path.join(__dirname, '..', 'data', 'activity.log')
+const UPLOAD_DIR = path.join(__dirname, '..', 'data', 'uploads')
 const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:5173'
 
 if (!DATABASE_URL) {
@@ -23,6 +25,7 @@ if (!DATABASE_URL) {
 }
 
 fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true })
+fs.mkdirSync(UPLOAD_DIR, { recursive: true })
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
@@ -36,6 +39,53 @@ app.use(
 )
 app.use(express.json({ limit: '1mb' }))
 app.use(morgan('dev'))
+app.use('/uploads', express.static(UPLOAD_DIR))
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname || '').toLowerCase() || '.bin'
+      cb(null, `${Date.now()}-${randomFrom('abcdefghijklmnopqrstuvwxyz0123456789', 8)}${ext}`)
+    },
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype?.startsWith('image/')) cb(null, true)
+    else cb(new Error('仅支持图片文件上传'))
+  },
+})
+
+function defaultSiteContent() {
+  return {
+    hero_title: '方块世界补给中心',
+    hero_subtitle: '把服务器热卖礼包、补给订单和发货流程，集中到一个像样的商店首页。',
+    hero_description: '为生存服、RPG 服、公会服打造的轻量级商城。玩家像逛商店一样下单，管理员在后台手动发货，简单稳定，不折腾支付系统。',
+    hero_badge: '轻量级 Minecraft 物品交易平台',
+    status_text: '当前商店在线，支持下单与查询',
+    featured_label: '热门推荐',
+    featured_title: '服务器精品礼包',
+    featured_description: '适合在首页展示的重点推荐商品。',
+    announcement_title: '商店公告',
+    announcement_subtitle: '给玩家一眼就能看到的重要信息。',
+    announcements: [
+      '新玩家礼包支持自定义备注，可填写附魔需求或职业方向。',
+      '订单默认 24 小时内处理，如遇活动高峰将以公告为准。',
+      '推荐管理员定期在后台检查待处理订单，避免玩家长时间等待。',
+    ],
+    feature_title: '为什么适合 MC 服务器',
+    feature_subtitle: '轻量、直观、方便服主管理。',
+    features: [
+      { title: '极速下单', text: '无需支付接口，玩家提交订单后立即拿到订单号与 API Key。' },
+      { title: '人工发货', text: '管理员后台审核订单并填写发放指令，适合各类生存与 RPG 服务器。' },
+      { title: '状态可追踪', text: '玩家随时使用订单号或 API Key 查询发货进度与备注。' },
+    ],
+  }
+}
+
+function normalizeSiteContent(row) {
+  return row?.content || defaultSiteContent()
+}
 
 async function query(text, params = []) {
   return pool.query(text, params)
@@ -161,6 +211,14 @@ async function initDatabase() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `)
+  await query(`
+    CREATE TABLE IF NOT EXISTS site_content (
+      id SERIAL PRIMARY KEY,
+      content JSONB NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `)
 }
 
 async function ensureSeedData() {
@@ -175,9 +233,9 @@ async function ensureSeedData() {
   const productCount = await getRow('SELECT COUNT(*)::int AS count FROM products')
   if (productCount.count === 0) {
     const demoProducts = [
-      ['Starter Diamond Kit', 'Includes enchanted diamond armor and survival essentials.', 188, 'https://images.unsplash.com/photo-1511882150382-420c47ed7b9d?auto=format&fit=crop&w=900&q=80', true],
-      ['Golden Apple Pack', 'Premium PvP and survival healing package.', 100, 'https://images.unsplash.com/photo-1545239351-1141bd82e8a6?auto=format&fit=crop&w=900&q=80', true],
-      ['Efficiency Miner Bundle', 'Mining tools and resource gathering helpers.', 72, 'https://images.unsplash.com/photo-1519125323398-675f0ddb6308?auto=format&fit=crop&w=900&q=80', true],
+      ['附魔钻石新手包', '适合新玩家快速开荒，包含钻石装备、食物与基础药水。', 188, 'https://picsum.photos/seed/mc-diamond-kit/900/600', true],
+      ['金苹果战备箱', '高强度 PvP 与首领挑战常用补给，主打恢复和容错。', 100, 'https://picsum.photos/seed/mc-golden-apple/900/600', true],
+      ['矿工效率工具组', '提供高效率采集体验，适合长期生存服资源积累。', 72, 'https://picsum.photos/seed/mc-miner-bundle/900/600', true],
     ]
     for (const product of demoProducts) {
       await query(
@@ -187,6 +245,16 @@ async function ensureSeedData() {
     }
     await logAction('seed_products_created', { count: demoProducts.length })
   }
+
+  const siteContentCount = await getRow('SELECT COUNT(*)::int AS count FROM site_content')
+  if (siteContentCount.count === 0) {
+    await query('INSERT INTO site_content (content) VALUES ($1::jsonb)', [JSON.stringify(defaultSiteContent())])
+  }
+}
+
+async function getSiteContent() {
+  const row = await getRow('SELECT content FROM site_content ORDER BY id ASC LIMIT 1')
+  return normalizeSiteContent(row)
 }
 
 app.get('/api/health', (req, res) => res.json({ ok: true }))
@@ -197,6 +265,26 @@ app.get('/api/products', async (req, res) => {
     res.json(rows.map(normalizeProduct))
   } catch {
     res.status(500).json({ message: '获取商品失败' })
+  }
+})
+
+app.get('/api/site-content', async (req, res) => {
+  try {
+    res.json(await getSiteContent())
+  } catch {
+    res.status(500).json({ message: '获取页面内容失败' })
+  }
+})
+
+app.post('/api/admin/uploads', authRequired, upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: '未上传文件' })
+    res.status(201).json({
+      url: `/uploads/${req.file.filename}`,
+      filename: req.file.filename,
+    })
+  } catch {
+    res.status(500).json({ message: '上传失败' })
   }
 })
 
@@ -285,6 +373,42 @@ app.post('/api/admin/login', async (req, res) => {
     res.json({ token, admin: { id: admin.id, username: admin.username } })
   } catch {
     res.status(500).json({ message: '登录失败' })
+  }
+})
+
+app.get('/api/admin/site-content', authRequired, async (req, res) => {
+  try {
+    res.json(await getSiteContent())
+  } catch {
+    res.status(500).json({ message: '获取页面内容失败' })
+  }
+})
+
+app.put('/api/admin/site-content', authRequired, async (req, res) => {
+  try {
+    const nextContent = {
+      ...defaultSiteContent(),
+      ...(req.body || {}),
+    }
+    nextContent.announcements = Array.isArray(nextContent.announcements)
+      ? nextContent.announcements.map((item) => String(item).trim()).filter(Boolean)
+      : defaultSiteContent().announcements
+    nextContent.features = Array.isArray(nextContent.features)
+      ? nextContent.features
+        .map((item) => ({ title: String(item?.title || '').trim(), text: String(item?.text || '').trim() }))
+        .filter((item) => item.title && item.text)
+      : defaultSiteContent().features
+
+    const existing = await getRow('SELECT id FROM site_content ORDER BY id ASC LIMIT 1')
+    if (existing) {
+      await query('UPDATE site_content SET content = $1::jsonb, updated_at = NOW() WHERE id = $2', [JSON.stringify(nextContent), existing.id])
+    } else {
+      await query('INSERT INTO site_content (content) VALUES ($1::jsonb)', [JSON.stringify(nextContent)])
+    }
+    await logAction('site_content_updated', { admin: req.admin.username })
+    res.json(nextContent)
+  } catch {
+    res.status(500).json({ message: '保存页面内容失败' })
   }
 })
 
@@ -454,6 +578,13 @@ app.put('/api/admin/admins/:id/password', authRequired, async (req, res) => {
   } catch {
     res.status(500).json({ message: '修改密码失败' })
   }
+})
+
+app.use((error, req, res, next) => {
+  if (error instanceof multer.MulterError || error?.message === '仅支持图片文件上传') {
+    return res.status(400).json({ message: error.message })
+  }
+  return next(error)
 })
 
 app.use((req, res) => res.status(404).json({ message: '接口不存在' }))
