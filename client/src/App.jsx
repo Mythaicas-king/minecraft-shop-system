@@ -8,6 +8,7 @@ const emptyProductForm = {
   name: '',
   description: '',
   price: '',
+  category: '热门补给',
   image_url: '',
   is_active: true,
 }
@@ -36,6 +37,7 @@ function createDefaultSiteContent() {
     featured_label: '热门推荐',
     featured_title: '服务器精品礼包',
     featured_description: '适合在首页展示的重点推荐商品。',
+    featured_product_id: null,
     announcement_title: '商店公告',
     announcement_subtitle: '给玩家一眼就能看到的重要信息。',
     announcements: [
@@ -45,6 +47,11 @@ function createDefaultSiteContent() {
     ],
     feature_title: '为什么适合 MC 服务器',
     feature_subtitle: '轻量、直观、方便服主管理。',
+    category_sections: [
+      { key: '热门补给', title: '热门补给' },
+      { key: '战斗物资', title: '战斗物资' },
+      { key: '挖矿工具', title: '挖矿工具' },
+    ],
     features: [
       { title: '极速下单', text: '无需支付接口，玩家提交订单后立即拿到订单号与 API Key。' },
       { title: '人工发货', text: '管理员后台审核订单并填写发放指令，适合各类生存与 RPG 服务器。' },
@@ -86,6 +93,8 @@ function Shell({ children, title, right }) {
 function Storefront() {
   const [products, setProducts] = useState([])
   const [siteContent, setSiteContent] = useState(createDefaultSiteContent)
+  const [searchTerm, setSearchTerm] = useState('')
+  const [selectedProduct, setSelectedProduct] = useState(null)
   const [cart, setCart] = useState(() => {
     try {
       const saved = localStorage.getItem('ms_cart')
@@ -114,8 +123,26 @@ function Storefront() {
   const total = useMemo(() => cart.reduce((sum, item) => sum + item.price * item.quantity, 0), [cart])
   const totalQuantity = useMemo(() => cart.reduce((sum, item) => sum + item.quantity, 0), [cart])
 
-  const featuredProduct = products[0]
-  const secondaryProducts = products.slice(1, 3)
+  const filteredProducts = useMemo(() => {
+    const keyword = searchTerm.trim().toLowerCase()
+    if (!keyword) return products
+    return products.filter((product) => product.name.toLowerCase().includes(keyword))
+  }, [products, searchTerm])
+
+  const featuredProduct = useMemo(() => {
+    if (siteContent.featured_product_id) {
+      return products.find((product) => product.id === Number(siteContent.featured_product_id)) || products[0]
+    }
+    return products[0]
+  }, [products, siteContent.featured_product_id])
+
+  const secondaryProducts = filteredProducts.filter((product) => product.id !== featuredProduct?.id).slice(0, 2)
+  const categorySections = siteContent.category_sections?.length ? siteContent.category_sections : createDefaultSiteContent().category_sections
+  const groupedProducts = categorySections.map((section) => ({
+    ...section,
+    products: filteredProducts.filter((product) => product.category === section.key),
+  })).filter((section) => section.products.length > 0)
+  const uncategorizedProducts = filteredProducts.filter((product) => !categorySections.some((section) => section.key === product.category))
   const serverStats = [
     { value: `${products.length}`, label: '在售礼包' },
     { value: totalQuantity ? `${totalQuantity}` : '0', label: '购物车数量' },
@@ -329,25 +356,42 @@ function Storefront() {
       )}
 
       <section className="section-head">
-        <h3>热卖商品</h3>
-        <p className="muted">点击加入购物车后可统一结算。</p>
+        <div>
+          <h3>热卖商品</h3>
+          <p className="muted">点击商品查看详情，也可以直接按名称搜索。</p>
+        </div>
+        <div className="search-box">
+          <input placeholder="搜索商品名" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+        </div>
       </section>
 
-      <div className="product-grid">
-        {products.map((product) => (
-          <article className="product-card panel" key={product.id}>
-            <SafeImage src={product.image_url} alt={product.name} />
-            <div className="product-body">
-              <h4>{product.name}</h4>
-              <p>{product.description}</p>
-              <div className="product-foot">
-                <strong>{product.price} 金币</strong>
-                <button className="primary-button small" onClick={() => addToCart(product)}>加入购物车</button>
-              </div>
-            </div>
-          </article>
-        ))}
-      </div>
+      {groupedProducts.map((section) => (
+        <section className="category-section" key={section.key}>
+          <div className="section-head compact">
+            <h3>{section.title}</h3>
+            <p className="muted">{section.products.length} 件商品</p>
+          </div>
+          <div className="product-grid compact-grid">
+            {section.products.map((product) => (
+              <ProductCard key={product.id} product={product} onAdd={addToCart} onView={setSelectedProduct} />
+            ))}
+          </div>
+        </section>
+      ))}
+
+      {!!uncategorizedProducts.length && (
+        <section className="category-section">
+          <div className="section-head compact">
+            <h3>更多商品</h3>
+            <p className="muted">未归类商品</p>
+          </div>
+          <div className="product-grid compact-grid">
+            {uncategorizedProducts.map((product) => (
+              <ProductCard key={product.id} product={product} onAdd={addToCart} onView={setSelectedProduct} />
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className="query-panel panel" id="query-section">
         <div>
@@ -383,6 +427,10 @@ function Storefront() {
           total={total}
         />
       )}
+
+      {selectedProduct && (
+        <ProductDetailModal product={selectedProduct} onAdd={addToCart} onClose={() => setSelectedProduct(null)} />
+      )}
     </Shell>
   )
 }
@@ -395,6 +443,49 @@ function SafeImage({ alt, className = '', src }) {
   }, [src])
 
   return <img className={className} src={imageSrc} alt={alt} onError={() => setImageSrc(fallbackImage)} />
+}
+
+function ProductCard({ onAdd, onView, product }) {
+  return (
+    <article className="product-card panel" key={product.id}>
+      <SafeImage src={product.image_url} alt={product.name} />
+      <div className="product-body">
+        <div className="product-meta-row">
+          <span className="category-chip">{product.category}</span>
+          <button className="text-button" onClick={() => onView(product)}>商品详情</button>
+        </div>
+        <h4>{product.name}</h4>
+        <p>{product.description}</p>
+        <div className="product-foot">
+          <strong>{product.price} 金币</strong>
+          <button className="primary-button small" onClick={() => onAdd(product)}>加入购物车</button>
+        </div>
+      </div>
+    </article>
+  )
+}
+
+function ProductDetailModal({ product, onAdd, onClose }) {
+  return (
+    <ModalFrame title={product.name} onClose={onClose}>
+      <div className="detail-modal-grid">
+        <SafeImage className="detail-image" src={product.image_url} alt={product.name} />
+        <div className="form-grid">
+          <span className="category-chip">{product.category}</span>
+          <p className="muted">{product.description}</p>
+          <div className="summary-card">
+            <p><strong>商品名称：</strong>{product.name}</p>
+            <p><strong>分类：</strong>{product.category}</p>
+            <p><strong>价格：</strong>{product.price} 金币</p>
+          </div>
+          <div className="button-group">
+            <button className="ghost-button" onClick={onClose}>关闭</button>
+            <button className="primary-button" onClick={() => onAdd(product)}>加入购物车</button>
+          </div>
+        </div>
+      </div>
+    </ModalFrame>
+  )
 }
 
 function UploadDropzone({ imageUrl, loading, onFileSelect }) {
@@ -501,7 +592,7 @@ function CheckoutModal({ loading, onClose, onSubmit, cart, total }) {
           <input value={form.player_id} onChange={(e) => setForm((s) => ({ ...s, player_id: e.target.value }))} />
         </label>
         <label>
-          物资需求说明
+          自定义备注 / 物资需求说明
           <textarea value={form.note} onChange={(e) => setForm((s) => ({ ...s, note: e.target.value }))} />
         </label>
         <label>
@@ -543,7 +634,7 @@ function CopyButton({ value, label = '复制' }) {
 
 function AdminLoginPage() {
   const navigate = useNavigate()
-  const [form, setForm] = useState({ username: 'admin', password: 'admin123' })
+  const [form, setForm] = useState({ username: '', password: '' })
   const [loading, setLoading] = useState(false)
 
   const submit = async (e) => {
@@ -634,7 +725,10 @@ function AdminShell() {
     if (section === 'orders') loadOrders().catch(() => toast.error('加载订单失败'))
     if (section === 'products') loadProducts().catch(() => toast.error('加载商品失败'))
     if (section === 'admins') loadAdmins().catch(() => toast.error('加载管理员失败'))
-    if (section === 'content') loadSiteContent().catch(() => toast.error('加载页面内容失败'))
+    if (section === 'content') {
+      loadSiteContent().catch(() => toast.error('加载页面内容失败'))
+      loadProducts().catch(() => toast.error('加载商品失败'))
+    }
   }, [section, statusFilter, tokenReady])
 
   useEffect(() => {
@@ -792,7 +886,7 @@ function AdminShell() {
   return (
     <Shell
       title="后台管理面板"
-      right={<><span className="muted">{admin?.username}</span><button className="ghost-button" onClick={logout}>登出</button></>}
+      right={<><Link className="ghost-button" to="/">直达首页</Link><span className="muted">{admin?.username}</span><button className="ghost-button" onClick={logout}>登出</button></>}
     >
       <div className="admin-layout">
         <aside className="sidebar panel">
@@ -850,6 +944,7 @@ function AdminShell() {
                 <label>商品名称<input value={productForm.name} onChange={(e) => setProductForm((s) => ({ ...s, name: e.target.value }))} /></label>
                 <label>商品描述<textarea value={productForm.description} onChange={(e) => setProductForm((s) => ({ ...s, description: e.target.value }))} /></label>
                 <label>价格<input type="number" value={productForm.price} onChange={(e) => setProductForm((s) => ({ ...s, price: e.target.value }))} /></label>
+                <label>商品分类<input value={productForm.category || ''} onChange={(e) => setProductForm((s) => ({ ...s, category: e.target.value }))} /></label>
                 <label>图片URL<input value={productForm.image_url} onChange={(e) => setProductForm((s) => ({ ...s, image_url: e.target.value }))} /></label>
                 <UploadDropzone imageUrl={productForm.image_url} loading={imageUploading} onFileSelect={uploadImage} />
                 <label className="switch-row"><input type="checkbox" checked={productForm.is_active} onChange={(e) => setProductForm((s) => ({ ...s, is_active: e.target.checked }))} />上架状态</label>
@@ -905,6 +1000,12 @@ function AdminShell() {
                   <label>推荐区标签<input value={siteContentForm.featured_label} onChange={(e) => setSiteContentForm((s) => ({ ...s, featured_label: e.target.value }))} /></label>
                   <label>推荐区默认标题<input value={siteContentForm.featured_title} onChange={(e) => setSiteContentForm((s) => ({ ...s, featured_title: e.target.value }))} /></label>
                   <label>推荐区默认说明<textarea value={siteContentForm.featured_description} onChange={(e) => setSiteContentForm((s) => ({ ...s, featured_description: e.target.value }))} /></label>
+                  <label>本周热门商品
+                    <select value={siteContentForm.featured_product_id || ''} onChange={(e) => setSiteContentForm((s) => ({ ...s, featured_product_id: e.target.value ? Number(e.target.value) : null }))}>
+                      <option value="">自动选择第一件商品</option>
+                      {products.map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}
+                    </select>
+                  </label>
                   <label>公告标题<input value={siteContentForm.announcement_title} onChange={(e) => setSiteContentForm((s) => ({ ...s, announcement_title: e.target.value }))} /></label>
                   <label>公告副标题<input value={siteContentForm.announcement_subtitle} onChange={(e) => setSiteContentForm((s) => ({ ...s, announcement_subtitle: e.target.value }))} /></label>
                   {siteContentForm.announcements.map((item, index) => (
@@ -916,6 +1017,16 @@ function AdminShell() {
                   <h4>卖点卡片</h4>
                   <label>卖点区标题<input value={siteContentForm.feature_title} onChange={(e) => setSiteContentForm((s) => ({ ...s, feature_title: e.target.value }))} /></label>
                   <label>卖点区副标题<input value={siteContentForm.feature_subtitle} onChange={(e) => setSiteContentForm((s) => ({ ...s, feature_subtitle: e.target.value }))} /></label>
+                  <h4>商品分类标题</h4>
+                  <div className="feature-editor-grid">
+                    {siteContentForm.category_sections.map((item, index) => (
+                      <div className="feature-editor-card" key={`category-${index}`}>
+                        <label>分类键值<input value={item.key} onChange={(e) => setSiteContentForm((s) => ({ ...s, category_sections: s.category_sections.map((entry, entryIndex) => (entryIndex === index ? { ...entry, key: e.target.value } : entry)) }))} /></label>
+                        <label>分类标题<input value={item.title} onChange={(e) => setSiteContentForm((s) => ({ ...s, category_sections: s.category_sections.map((entry, entryIndex) => (entryIndex === index ? { ...entry, title: e.target.value } : entry)) }))} /></label>
+                      </div>
+                    ))}
+                  </div>
+                  <h4>卖点卡片</h4>
                   <div className="feature-editor-grid">
                     {siteContentForm.features.map((item, index) => (
                       <div className="feature-editor-card" key={`feature-${index}`}>
