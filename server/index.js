@@ -325,10 +325,27 @@ function normalizeUser(row) {
     username: row.username,
     player_id: row.player_id,
     email: row.email,
+    invite_code: row.invite_code,
     is_banned: row.is_banned,
     banned_reason: row.banned_reason,
     created_at: row.created_at,
     last_login_at: row.last_login_at,
+  }
+}
+
+function normalizeInvite(row) {
+  return {
+    id: row.id,
+    code: row.code,
+    note: row.note,
+    created_by_admin_id: row.created_by_admin_id,
+    created_by_admin_username: row.created_by_admin_username,
+    assigned_to: row.assigned_to,
+    used_by_user_id: row.used_by_user_id,
+    used_by_username: row.used_by_username,
+    used_at: row.used_at,
+    created_at: row.created_at,
+    is_used: Boolean(row.used_by_user_id),
   }
 }
 
@@ -360,11 +377,26 @@ async function initDatabase() {
       username TEXT UNIQUE NOT NULL,
       player_id TEXT UNIQUE NOT NULL,
       email TEXT NOT NULL DEFAULT '',
+      invite_code TEXT UNIQUE,
       password_hash TEXT NOT NULL,
       is_banned BOOLEAN NOT NULL DEFAULT FALSE,
       banned_reason TEXT NOT NULL DEFAULT '',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       last_login_at TIMESTAMPTZ
+    )
+  `)
+  await query('ALTER TABLE users ADD COLUMN IF NOT EXISTS invite_code TEXT')
+  await query('CREATE UNIQUE INDEX IF NOT EXISTS users_invite_code_key ON users(invite_code) WHERE invite_code IS NOT NULL')
+  await query(`
+    CREATE TABLE IF NOT EXISTS invite_codes (
+      id SERIAL PRIMARY KEY,
+      code TEXT UNIQUE NOT NULL,
+      note TEXT NOT NULL DEFAULT '',
+      assigned_to TEXT NOT NULL DEFAULT '',
+      created_by_admin_id INTEGER REFERENCES admins(id) ON DELETE SET NULL,
+      used_by_user_id INTEGER UNIQUE REFERENCES users(id) ON DELETE SET NULL,
+      used_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `)
   await query(`
@@ -406,12 +438,13 @@ async function initDatabase() {
 }
 
 async function ensureSeedData() {
-  const admin = await getRow('SELECT id FROM admins LIMIT 1')
+  let admin = await getRow('SELECT id, username FROM admins LIMIT 1')
   if (!admin) {
     const hash = await bcrypt.hash('admin123', 10)
     await query('INSERT INTO admins (username, password_hash) VALUES ($1, $2)', ['admin', hash])
     console.log('Created default admin account: admin / admin123. Please change the password after first login.')
     await logAction('default_admin_created', { username: 'admin' })
+    admin = await getRow('SELECT id, username FROM admins WHERE username = $1', ['admin'])
   }
 
   const productCount = await getRow('SELECT COUNT(*)::int AS count FROM products')
@@ -433,6 +466,16 @@ async function ensureSeedData() {
   const siteContentCount = await getRow('SELECT COUNT(*)::int AS count FROM site_content')
   if (siteContentCount.count === 0) {
     await query('INSERT INTO site_content (content) VALUES ($1::jsonb)', [JSON.stringify(defaultSiteContent())])
+  }
+
+  const inviteCount = await getRow('SELECT COUNT(*)::int AS count FROM invite_codes')
+  if (inviteCount.count === 0 && admin) {
+    const seedCode = `INV-${randomFrom('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 10)}`
+    await query(
+      'INSERT INTO invite_codes (code, note, assigned_to, created_by_admin_id) VALUES ($1, $2, $3, $4)',
+      [seedCode, '系统初始化邀请码', '首位测试玩家', admin.id],
+    )
+    await logAction('seed_invite_created', { code: seedCode })
   }
 }
 
@@ -469,13 +512,15 @@ app.get('/api/captcha', (req, res) => {
 
 app.post('/api/auth/register', async (req, res) => {
   try {
-    const { username, player_id, password, email = '', captcha_token, captcha_answer } = req.body || {}
+    const { username, player_id, password, email = '', invite_code, captcha_token, captcha_answer } = req.body || {}
     const normalizedUsername = String(username || '').trim()
     const normalizedPlayerId = String(player_id || '').trim()
     const normalizedEmail = String(email || '').trim()
+    const normalizedInviteCode = String(invite_code || '').trim().toUpperCase()
     if (!normalizedUsername || !normalizedPlayerId || !password) {
       return res.status(400).json({ message: '用户名、游戏ID和密码不能为空' })
     }
+    if (!normalizedInviteCode) return res.status(400).json({ message: '注册需要邀请码' })
     if (String(password).length < 6) return res.status(400).json({ message: '密码至少需要 6 位' })
     if (!verifyCaptchaResponse(captcha_token, captcha_answer, 'register')) {
       return res.status(400).json({ message: '验证码错误或已过期，请刷新后重试' })
@@ -485,16 +530,20 @@ app.post('/api/auth/register', async (req, res) => {
     if (usernameExists) return res.status(400).json({ message: '用户名已存在' })
     const playerIdExists = await getRow('SELECT 1 FROM users WHERE LOWER(player_id) = LOWER($1)', [normalizedPlayerId])
     if (playerIdExists) return res.status(400).json({ message: '该游戏ID已绑定账号' })
+    const invite = await getRow('SELECT * FROM invite_codes WHERE UPPER(code) = $1', [normalizedInviteCode])
+    if (!invite) return res.status(400).json({ message: '邀请码不存在' })
+    if (invite.used_by_user_id) return res.status(400).json({ message: '该邀请码已被使用' })
 
     const hash = await bcrypt.hash(password, 10)
     const created = await getRow(
-      `INSERT INTO users (username, player_id, email, password_hash)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO users (username, player_id, email, invite_code, password_hash)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-      [normalizedUsername, normalizedPlayerId, normalizedEmail, hash],
+      [normalizedUsername, normalizedPlayerId, normalizedEmail, normalizedInviteCode, hash],
     )
+    await query('UPDATE invite_codes SET used_by_user_id = $1, used_at = NOW() WHERE id = $2', [created.id, invite.id])
     const token = createUserToken(created)
-    await logAction('user_registered', { id: created.id, username: created.username, playerId: created.player_id })
+    await logAction('user_registered', { id: created.id, username: created.username, playerId: created.player_id, inviteCode: normalizedInviteCode })
     res.status(201).json({ token, user: normalizeUser(created) })
   } catch {
     res.status(500).json({ message: '注册失败' })
@@ -548,11 +597,11 @@ app.post('/api/admin/uploads', authRequired, upload.single('image'), async (req,
   }
 })
 
-app.post('/api/orders', userAuthOptional, async (req, res) => {
+app.post('/api/orders', userAuthRequired, async (req, res) => {
   try {
     const { player_id, items, note = '', email = '', captcha_token, captcha_answer } = req.body || {}
-    const activeUser = req.user || null
-    const normalizedPlayerId = activeUser ? String(activeUser.player_id).trim() : String(player_id || '').trim()
+    const activeUser = req.user
+    const normalizedPlayerId = String(activeUser.player_id).trim() || String(player_id || '').trim()
     const normalizedEmail = String(email || '').trim()
     if (!normalizedPlayerId) return res.status(400).json({ message: '游戏ID不能为空' })
     if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ message: '订单商品不能为空' })
@@ -835,14 +884,14 @@ app.get('/api/admin/users', authRequired, async (req, res) => {
     const search = String(req.query.search || '').trim()
     const rows = search
       ? await getRows(
-        `SELECT id, username, player_id, email, is_banned, banned_reason, created_at, last_login_at
+        `SELECT id, username, player_id, email, invite_code, is_banned, banned_reason, created_at, last_login_at
          FROM users
-         WHERE username ILIKE $1 OR player_id ILIKE $1 OR email ILIKE $1
+         WHERE username ILIKE $1 OR player_id ILIKE $1 OR email ILIKE $1 OR invite_code ILIKE $1
          ORDER BY created_at DESC, id DESC`,
         [`%${search}%`],
       )
       : await getRows(
-        `SELECT id, username, player_id, email, is_banned, banned_reason, created_at, last_login_at
+        `SELECT id, username, player_id, email, invite_code, is_banned, banned_reason, created_at, last_login_at
          FROM users
          ORDER BY created_at DESC, id DESC
          LIMIT 100`,
@@ -876,6 +925,75 @@ app.put('/api/admin/users/:id/ban', authRequired, async (req, res) => {
     res.json(updated)
   } catch {
     res.status(500).json({ message: '更新封禁状态失败' })
+  }
+})
+
+app.get('/api/admin/invites', authRequired, async (req, res) => {
+  try {
+    const rows = await getRows(
+      `SELECT ic.*, a.username AS created_by_admin_username, u.username AS used_by_username
+       FROM invite_codes ic
+       LEFT JOIN admins a ON a.id = ic.created_by_admin_id
+       LEFT JOIN users u ON u.id = ic.used_by_user_id
+       ORDER BY ic.created_at DESC, ic.id DESC`,
+    )
+    res.json(rows.map(normalizeInvite))
+  } catch {
+    res.status(500).json({ message: '获取邀请码失败' })
+  }
+})
+
+app.post('/api/admin/invites', authRequired, async (req, res) => {
+  try {
+    const count = Math.min(Math.max(Number(req.body?.count || 1), 1), 50)
+    const note = String(req.body?.note || '').trim()
+    const assigned_to = String(req.body?.assigned_to || '').trim()
+    const created = []
+    for (let index = 0; index < count; index += 1) {
+      let code = `INV-${randomFrom('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 10)}`
+      while (await getRow('SELECT 1 FROM invite_codes WHERE code = $1', [code])) {
+        code = `INV-${randomFrom('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 10)}`
+      }
+      const row = await getRow(
+        `INSERT INTO invite_codes (code, note, assigned_to, created_by_admin_id)
+         VALUES ($1, $2, $3, $4)
+         RETURNING *`,
+        [code, note, assigned_to, req.admin.id],
+      )
+      created.push(normalizeInvite({
+        ...row,
+        created_by_admin_username: req.admin.username,
+        used_by_username: null,
+      }))
+    }
+    await logAction('invite_codes_created', { count, admin: req.admin.username, assigned_to, note })
+    res.status(201).json(created)
+  } catch {
+    res.status(500).json({ message: '生成邀请码失败' })
+  }
+})
+
+app.put('/api/admin/invites/:id', authRequired, async (req, res) => {
+  try {
+    const { id } = req.params
+    const invite = await getRow('SELECT * FROM invite_codes WHERE id = $1', [id])
+    if (!invite) return res.status(404).json({ message: '邀请码不存在' })
+    if (invite.used_by_user_id) return res.status(400).json({ message: '已使用的邀请码不能再修改分发信息' })
+    const updated = await getRow(
+      `UPDATE invite_codes
+       SET note = $1, assigned_to = $2
+       WHERE id = $3
+       RETURNING *`,
+      [String(req.body?.note || '').trim(), String(req.body?.assigned_to || '').trim(), id],
+    )
+    await logAction('invite_code_updated', { id, admin: req.admin.username })
+    res.json(normalizeInvite({
+      ...updated,
+      created_by_admin_username: req.admin.username,
+      used_by_username: null,
+    }))
+  } catch {
+    res.status(500).json({ message: '更新邀请码失败' })
   }
 })
 

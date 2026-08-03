@@ -23,6 +23,7 @@ const emptyUserAuthForm = {
   username: '',
   player_id: '',
   email: '',
+  invite_code: '',
   password: '',
   confirmPassword: '',
 }
@@ -165,6 +166,8 @@ function Storefront() {
     localStorage.removeItem('ms_user')
     setUserToken('')
     setCurrentUser(null)
+    setDrawerOpen(false)
+    setCheckoutOpen(false)
   }
 
   const total = useMemo(() => cart.reduce((sum, item) => sum + item.price * item.quantity, 0), [cart])
@@ -198,6 +201,12 @@ function Storefront() {
   ]
 
   const addToCart = (product) => {
+    if (!currentUser) {
+      setAuthModalMode('login')
+      setAuthModalOpen(true)
+      toast.error('请先登录账号，再加入购物车')
+      return
+    }
     setCart((current) => {
       const exists = current.find((item) => item.id === product.id)
       if (exists) {
@@ -247,11 +256,12 @@ function Storefront() {
       username: userAuthForm.username.trim(),
       player_id: userAuthForm.player_id.trim(),
       email: userAuthForm.email.trim(),
+      invite_code: userAuthForm.invite_code.trim().toUpperCase(),
       password: userAuthForm.password,
       captcha_token: captcha?.token || '',
       captcha_answer: captcha?.answer?.trim() || '',
     }
-    if (!payload.username || !payload.password || (authModalMode === 'register' && !payload.player_id)) {
+    if (!payload.username || !payload.password || (authModalMode === 'register' && (!payload.player_id || !payload.invite_code))) {
       toast.error(authModalMode === 'register' ? '请填写完整注册信息' : '请填写用户名和密码')
       return
     }
@@ -343,7 +353,7 @@ function Storefront() {
             </>
           )}
           <Link className="ghost-button" to="/admin/login">管理员登录</Link>
-          <button className="cart-button" onClick={() => setDrawerOpen(true)}>
+          <button className="cart-button" onClick={() => currentUser ? setDrawerOpen(true) : (setAuthModalMode('login'), setAuthModalOpen(true))}>
             <span>购物车</span>
             <strong>{totalQuantity}</strong>
           </button>
@@ -363,13 +373,13 @@ function Storefront() {
             <span>移动端适配</span>
           </div>
           <div className="hero-actions">
-            <button className="primary-button" onClick={() => setDrawerOpen(true)}>查看购物车</button>
+            <button className="primary-button" onClick={() => currentUser ? setDrawerOpen(true) : (setAuthModalMode('login'), setAuthModalOpen(true))}>{currentUser ? '查看购物车' : '登录后购买'}</button>
             <a className="ghost-button" href="#query-section">订单查询</a>
           </div>
           <div className="account-banner">
             {currentUser
               ? `当前已登录账号：${currentUser.username}，下单将自动绑定到 ${currentUser.player_id}`
-              : '注册账号后，下单会自动绑定游戏ID，管理员也可以按账号名搜索和封禁。'}
+              : '现在必须先登录账号，才能加入购物车和购买；注册时需要输入后台发放的邀请码。'}
           </div>
         </div>
         <div className="hero-stage">
@@ -807,6 +817,12 @@ function UserAuthModal({ form, loading, mode, onChange, onClose, onModeChange, o
             <input type="email" value={form.email} onChange={(e) => onChange((current) => ({ ...current, email: e.target.value }))} />
           </label>
         )}
+        {mode === 'register' && (
+          <label>
+            邀请码
+            <input value={form.invite_code} onChange={(e) => onChange((current) => ({ ...current, invite_code: e.target.value.toUpperCase() }))} placeholder="例如 INV-ABCDEFG123" />
+          </label>
+        )}
         <label>
           密码
           <input type="password" value={form.password} onChange={(e) => onChange((current) => ({ ...current, password: e.target.value }))} />
@@ -922,9 +938,11 @@ function AdminShell() {
   const [orders, setOrders] = useState([])
   const [admins, setAdmins] = useState([])
   const [users, setUsers] = useState([])
+  const [invites, setInvites] = useState([])
   const [siteContentForm, setSiteContentForm] = useState(createDefaultSiteContent)
   const [statusFilter, setStatusFilter] = useState('all')
   const [userSearch, setUserSearch] = useState('')
+  const [inviteForm, setInviteForm] = useState({ count: 1, note: '', assigned_to: '' })
   const [productForm, setProductForm] = useState(emptyProductForm)
   const [editingProductId, setEditingProductId] = useState(null)
   const [imageUploading, setImageUploading] = useState(false)
@@ -935,6 +953,7 @@ function AdminShell() {
   const [adminModalOpen, setAdminModalOpen] = useState(false)
   const [passwordModal, setPasswordModal] = useState({ open: false, id: null, password: '', confirmPassword: '' })
   const [banModal, setBanModal] = useState({ open: false, user: null, reason: '', nextStatus: true })
+  const [inviteEditModal, setInviteEditModal] = useState({ open: false, invite: null, note: '', assigned_to: '' })
 
   useEffect(() => {
     const token = localStorage.getItem('ms_token')
@@ -969,6 +988,11 @@ function AdminShell() {
     setUsers(data)
   }
 
+  const loadInvites = async () => {
+    const { data } = await api.get('/admin/invites')
+    setInvites(data)
+  }
+
   const loadSiteContent = async () => {
     const { data } = await api.get('/admin/site-content')
     setSiteContentForm({ ...createDefaultSiteContent(), ...data })
@@ -980,6 +1004,7 @@ function AdminShell() {
     if (section === 'products') loadProducts().catch(() => toast.error('加载商品失败'))
     if (section === 'admins') loadAdmins().catch(() => toast.error('加载管理员失败'))
     if (section === 'users') loadUsers().catch(() => toast.error('加载用户失败'))
+    if (section === 'invites') loadInvites().catch(() => toast.error('加载邀请码失败'))
     if (section === 'content') {
       loadSiteContent().catch(() => toast.error('加载页面内容失败'))
       loadProducts().catch(() => toast.error('加载商品失败'))
@@ -993,7 +1018,7 @@ function AdminShell() {
 
   useEffect(() => {
     const path = location.pathname.split('/').at(-1)
-    if (['orders', 'products', 'users', 'admins', 'content'].includes(path)) setSection(path)
+    if (['orders', 'products', 'users', 'invites', 'admins', 'content'].includes(path)) setSection(path)
   }, [location.pathname])
 
   if (!tokenReady) return null
@@ -1150,6 +1175,35 @@ function AdminShell() {
     loadUsers()
   }
 
+  const submitInvites = async (event) => {
+    event.preventDefault()
+    const count = Number(inviteForm.count)
+    if (!Number.isInteger(count) || count <= 0) {
+      toast.error('生成数量必须是正整数')
+      return
+    }
+    const { data } = await api.post('/admin/invites', {
+      count,
+      note: inviteForm.note.trim(),
+      assigned_to: inviteForm.assigned_to.trim(),
+    })
+    toast.success(`已生成 ${data.length} 个邀请码`)
+    setInviteForm({ count: 1, note: '', assigned_to: '' })
+    loadInvites()
+  }
+
+  const saveInviteEdit = async (event) => {
+    event.preventDefault()
+    if (!inviteEditModal.invite) return
+    await api.put(`/admin/invites/${inviteEditModal.invite.id}`, {
+      note: inviteEditModal.note.trim(),
+      assigned_to: inviteEditModal.assigned_to.trim(),
+    })
+    toast.success('邀请码分发信息已更新')
+    setInviteEditModal({ open: false, invite: null, note: '', assigned_to: '' })
+    loadInvites()
+  }
+
   return (
     <Shell
       title="后台管理面板"
@@ -1160,6 +1214,7 @@ function AdminShell() {
           <button className={section === 'orders' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/orders')}>订单管理</button>
           <button className={section === 'products' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/products')}>商品管理</button>
           <button className={section === 'users' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/users')}>用户管理</button>
+          <button className={section === 'invites' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/invites')}>邀请码管理</button>
           <button className={section === 'content' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/content')}>内容管理</button>
           <button className={section === 'admins' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/admins')}>管理员管理</button>
         </aside>
@@ -1346,21 +1401,22 @@ function AdminShell() {
               <div className="section-toolbar wrap">
                 <div>
                   <h3>用户管理</h3>
-                  <p className="muted">支持按账号名、游戏ID或邮箱搜索，并可快速封禁或解除封禁。</p>
+                  <p className="muted">支持按账号名、游戏ID、邮箱或邀请码搜索，并可快速封禁或解除封禁。</p>
                 </div>
                 <form className="search-inline" onSubmit={(e) => { e.preventDefault(); loadUsers() }}>
-                  <input placeholder="搜索账号 / 游戏ID / 邮箱" value={userSearch} onChange={(e) => setUserSearch(e.target.value)} />
+                  <input placeholder="搜索账号 / 游戏ID / 邮箱 / 邀请码" value={userSearch} onChange={(e) => setUserSearch(e.target.value)} />
                   <button className="primary-button">搜索</button>
                 </form>
               </div>
               <div className="table-wrap">
                 <table>
-                  <thead><tr><th>账号名</th><th>游戏ID</th><th>邮箱</th><th>状态</th><th>最近登录</th><th>操作</th></tr></thead>
+                  <thead><tr><th>账号名</th><th>游戏ID</th><th>邀请码</th><th>邮箱</th><th>状态</th><th>最近登录</th><th>操作</th></tr></thead>
                   <tbody>
                     {users.map((item) => (
                       <tr key={item.id}>
                         <td>{item.username}</td>
                         <td>{item.player_id}</td>
+                        <td><code>{item.invite_code || '-'}</code></td>
                         <td>{item.email || '-'}</td>
                         <td>
                           <div className="user-status-cell">
@@ -1375,6 +1431,43 @@ function AdminShell() {
                           ) : (
                             <button onClick={() => setBanModal({ open: true, user: item, reason: '', nextStatus: true })}>封禁账号</button>
                           )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
+
+          {section === 'invites' && (
+            <section className="panel split-panel invite-split-panel">
+              <form className="form-grid" onSubmit={submitInvites}>
+                <h3>邀请码生成器</h3>
+                <label>生成数量<input type="number" min="1" max="50" value={inviteForm.count} onChange={(e) => setInviteForm((current) => ({ ...current, count: e.target.value }))} /></label>
+                <label>分发对象备注<input value={inviteForm.assigned_to} onChange={(e) => setInviteForm((current) => ({ ...current, assigned_to: e.target.value }))} placeholder="例如：8月活动群 / 玩家昵称" /></label>
+                <label>附加说明<textarea value={inviteForm.note} onChange={(e) => setInviteForm((current) => ({ ...current, note: e.target.value }))} placeholder="例如：仅限内测玩家，每码限 1 人使用" /></label>
+                <button className="primary-button">生成邀请码</button>
+              </form>
+              <div className="table-wrap">
+                <table>
+                  <thead><tr><th>邀请码</th><th>分发对象</th><th>说明</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
+                  <tbody>
+                    {invites.map((invite) => (
+                      <tr key={invite.id}>
+                        <td><code>{invite.code}</code></td>
+                        <td>{invite.assigned_to || '-'}</td>
+                        <td>{invite.note || '-'}</td>
+                        <td>
+                          <div className="user-status-cell">
+                            <span className={`status-pill ${invite.is_used ? 'badge-danger' : 'badge-success'}`}>{invite.is_used ? '已使用' : '未使用'}</span>
+                            {invite.is_used && <span className="muted tiny-text">使用者：{invite.used_by_username || `#${invite.used_by_user_id}`}</span>}
+                          </div>
+                        </td>
+                        <td>{formatTime(invite.created_at)}</td>
+                        <td className="row-actions">
+                          <CopyButton value={invite.code} label="复制邀请码" />
+                          {!invite.is_used && <button onClick={() => setInviteEditModal({ open: true, invite, note: invite.note || '', assigned_to: invite.assigned_to || '' })}>编辑分发</button>}
                         </td>
                       </tr>
                     ))}
@@ -1453,6 +1546,19 @@ function AdminShell() {
             <div className="button-group">
               <button type="button" className="ghost-button" onClick={() => setBanModal({ open: false, user: null, reason: '', nextStatus: true })}>取消</button>
               <button className="primary-button">确认{banModal.nextStatus ? '封禁' : '解除封禁'}</button>
+            </div>
+          </form>
+        </ModalFrame>
+      )}
+
+      {inviteEditModal.open && inviteEditModal.invite && (
+        <ModalFrame title={`编辑邀请码：${inviteEditModal.invite.code}`} onClose={() => setInviteEditModal({ open: false, invite: null, note: '', assigned_to: '' })}>
+          <form className="form-grid" onSubmit={saveInviteEdit}>
+            <label>分发对象备注<input value={inviteEditModal.assigned_to} onChange={(e) => setInviteEditModal((current) => ({ ...current, assigned_to: e.target.value }))} /></label>
+            <label>附加说明<textarea value={inviteEditModal.note} onChange={(e) => setInviteEditModal((current) => ({ ...current, note: e.target.value }))} /></label>
+            <div className="button-group">
+              <button type="button" className="ghost-button" onClick={() => setInviteEditModal({ open: false, invite: null, note: '', assigned_to: '' })}>取消</button>
+              <button className="primary-button">保存分发信息</button>
             </div>
           </form>
         </ModalFrame>
