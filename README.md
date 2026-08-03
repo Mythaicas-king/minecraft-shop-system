@@ -1,11 +1,12 @@
 # MC服务器物品商店系统
 
-一个基于 React + Express + PostgreSQL 的 Minecraft 服务器物品交易平台，支持前台下单、订单查询、后台商品管理、订单处理和多管理员账号。
+一个基于 React + Express + PostgreSQL 的 Minecraft 服务器物品交易平台，支持前台下单、订单查询、后台商品管理、订单处理、多管理员账号和对象存储图片上传。
 
 ## 技术栈
 
 - 前端：React + Vite + Axios + React Router + React Hot Toast
 - 后端：Node.js + Express + PostgreSQL + JWT + bcryptjs
+- 图片上传：兼容 S3 / Cloudflare R2 的对象存储
 - 部署：GitHub Pages（前端） + Render Web Service（后端） + Render PostgreSQL（数据库）
 
 ## 功能概览
@@ -31,6 +32,13 @@ PORT=3001
 JWT_SECRET=replace-with-a-long-random-string
 DATABASE_URL=postgresql://postgres:password@localhost:5432/minecraft_shop
 CORS_ORIGIN=http://localhost:5173
+S3_BUCKET=
+S3_REGION=auto
+S3_ENDPOINT=
+S3_ACCESS_KEY_ID=
+S3_SECRET_ACCESS_KEY=
+S3_PUBLIC_BASE_URL=
+S3_FORCE_PATH_STYLE=false
 ```
 
 3. 启动后端 API
@@ -102,6 +110,28 @@ CORS_ORIGIN=https://your-github-name.github.io
 ```
 
 如果你用了自定义域名，`CORS_ORIGIN` 可以写多个地址，用英文逗号分隔。
+
+### 4. 可选：配置对象存储图片上传
+
+如果你想让后台上传的商品图片在 Render 重部署后也不丢失，建议配置 S3 兼容对象存储，例如 Cloudflare R2、AWS S3、MinIO 或其他兼容服务。
+
+需要的环境变量：
+
+```env
+S3_BUCKET=your-bucket-name
+S3_REGION=auto
+S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
+S3_ACCESS_KEY_ID=your-access-key
+S3_SECRET_ACCESS_KEY=your-secret-key
+S3_PUBLIC_BASE_URL=https://pub-your-bucket.example.com
+S3_FORCE_PATH_STYLE=false
+```
+
+说明：
+
+- `S3_PUBLIC_BASE_URL` 推荐填写对象存储对外访问域名，这样商品图片会直接保存为长期可访问的公网 URL
+- Cloudflare R2 通常使用 `S3_REGION=auto`
+- 如果不配置这些变量，系统会退回到本地 `data/uploads`，适合本地开发，但不适合 Render 长期存储
 
 ## 默认账户
 

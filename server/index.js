@@ -8,6 +8,7 @@ const jwt = require('jsonwebtoken')
 const bcrypt = require('bcryptjs')
 const morgan = require('morgan')
 const multer = require('multer')
+const { PutObjectCommand, S3Client } = require('@aws-sdk/client-s3')
 const { Pool } = require('pg')
 
 dotenv.config()
@@ -19,6 +20,13 @@ const DATABASE_URL = process.env.DATABASE_URL
 const LOG_PATH = path.join(__dirname, '..', 'data', 'activity.log')
 const UPLOAD_DIR = path.join(__dirname, '..', 'data', 'uploads')
 const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:5173'
+const S3_BUCKET = process.env.S3_BUCKET || ''
+const S3_REGION = process.env.S3_REGION || 'auto'
+const S3_ENDPOINT = process.env.S3_ENDPOINT || ''
+const S3_ACCESS_KEY_ID = process.env.S3_ACCESS_KEY_ID || ''
+const S3_SECRET_ACCESS_KEY = process.env.S3_SECRET_ACCESS_KEY || ''
+const S3_PUBLIC_BASE_URL = process.env.S3_PUBLIC_BASE_URL || ''
+const S3_FORCE_PATH_STYLE = process.env.S3_FORCE_PATH_STYLE === 'true'
 
 if (!DATABASE_URL) {
   throw new Error('DATABASE_URL is required. Copy .env.example to .env and set PostgreSQL connection info.')
@@ -41,8 +49,22 @@ app.use(express.json({ limit: '1mb' }))
 app.use(morgan('dev'))
 app.use('/uploads', express.static(UPLOAD_DIR))
 
+const objectStorageEnabled = Boolean(S3_BUCKET && S3_ACCESS_KEY_ID && S3_SECRET_ACCESS_KEY && (S3_ENDPOINT || S3_PUBLIC_BASE_URL))
+
+const s3Client = objectStorageEnabled
+  ? new S3Client({
+    region: S3_REGION,
+    endpoint: S3_ENDPOINT || undefined,
+    forcePathStyle: S3_FORCE_PATH_STYLE,
+    credentials: {
+      accessKeyId: S3_ACCESS_KEY_ID,
+      secretAccessKey: S3_SECRET_ACCESS_KEY,
+    },
+  })
+  : null
+
 const upload = multer({
-  storage: multer.diskStorage({
+  storage: objectStorageEnabled ? multer.memoryStorage() : multer.diskStorage({
     destination: (req, file, cb) => cb(null, UPLOAD_DIR),
     filename: (req, file, cb) => {
       const ext = path.extname(file.originalname || '').toLowerCase() || '.bin'
@@ -66,6 +88,7 @@ function defaultSiteContent() {
     featured_label: '热门推荐',
     featured_title: '服务器精品礼包',
     featured_description: '适合在首页展示的重点推荐商品。',
+    featured_product_id: null,
     announcement_title: '商店公告',
     announcement_subtitle: '给玩家一眼就能看到的重要信息。',
     announcements: [
@@ -75,6 +98,11 @@ function defaultSiteContent() {
     ],
     feature_title: '为什么适合 MC 服务器',
     feature_subtitle: '轻量、直观、方便服主管理。',
+    category_sections: [
+      { key: '热门补给', title: '热门补给' },
+      { key: '战斗物资', title: '战斗物资' },
+      { key: '挖矿工具', title: '挖矿工具' },
+    ],
     features: [
       { title: '极速下单', text: '无需支付接口，玩家提交订单后立即拿到订单号与 API Key。' },
       { title: '人工发货', text: '管理员后台审核订单并填写发放指令，适合各类生存与 RPG 服务器。' },
@@ -85,6 +113,40 @@ function defaultSiteContent() {
 
 function normalizeSiteContent(row) {
   return row?.content || defaultSiteContent()
+}
+
+function buildObjectStorageUrl(key) {
+  if (S3_PUBLIC_BASE_URL) {
+    return `${S3_PUBLIC_BASE_URL.replace(/\/$/, '')}/${key}`
+  }
+  if (S3_ENDPOINT) {
+    return `${S3_ENDPOINT.replace(/\/$/, '')}/${S3_BUCKET}/${key}`
+  }
+  return `https://${S3_BUCKET}.s3.${S3_REGION}.amazonaws.com/${key}`
+}
+
+async function persistUpload(file) {
+  if (objectStorageEnabled) {
+    const ext = path.extname(file.originalname || '').toLowerCase() || '.bin'
+    const key = `products/${Date.now()}-${randomFrom('abcdefghijklmnopqrstuvwxyz0123456789', 12)}${ext}`
+    await s3Client.send(new PutObjectCommand({
+      Bucket: S3_BUCKET,
+      Key: key,
+      Body: file.buffer,
+      ContentType: file.mimetype || 'application/octet-stream',
+    }))
+    return {
+      key,
+      url: buildObjectStorageUrl(key),
+      storage: 'object-storage',
+    }
+  }
+
+  return {
+    key: file.filename,
+    url: `/uploads/${file.filename}`,
+    storage: 'local',
+  }
 }
 
 async function query(text, params = []) {
@@ -144,6 +206,7 @@ function normalizeProduct(row) {
     name: row.name,
     description: row.description,
     price: row.price,
+    category: row.category,
     image_url: row.image_url,
     is_active: row.is_active,
     created_at: row.created_at,
@@ -182,11 +245,13 @@ async function initDatabase() {
       name TEXT NOT NULL,
       description TEXT NOT NULL,
       price INTEGER NOT NULL,
+      category TEXT NOT NULL DEFAULT '热门补给',
       image_url TEXT NOT NULL,
       is_active BOOLEAN NOT NULL DEFAULT TRUE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `)
+  await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT '热门补给'`)
   await query(`
     CREATE TABLE IF NOT EXISTS orders (
       id SERIAL PRIMARY KEY,
@@ -233,13 +298,13 @@ async function ensureSeedData() {
   const productCount = await getRow('SELECT COUNT(*)::int AS count FROM products')
   if (productCount.count === 0) {
     const demoProducts = [
-      ['附魔钻石新手包', '适合新玩家快速开荒，包含钻石装备、食物与基础药水。', 188, 'https://picsum.photos/seed/mc-diamond-kit/900/600', true],
-      ['金苹果战备箱', '高强度 PvP 与首领挑战常用补给，主打恢复和容错。', 100, 'https://picsum.photos/seed/mc-golden-apple/900/600', true],
-      ['矿工效率工具组', '提供高效率采集体验，适合长期生存服资源积累。', 72, 'https://picsum.photos/seed/mc-miner-bundle/900/600', true],
+      ['附魔钻石新手包', '适合新玩家快速开荒，包含钻石装备、食物与基础药水。', 188, '热门补给', 'https://picsum.photos/seed/mc-diamond-kit/900/600', true],
+      ['金苹果战备箱', '高强度 PvP 与首领挑战常用补给，主打恢复和容错。', 100, '战斗物资', 'https://picsum.photos/seed/mc-golden-apple/900/600', true],
+      ['矿工效率工具组', '提供高效率采集体验，适合长期生存服资源积累。', 72, '挖矿工具', 'https://picsum.photos/seed/mc-miner-bundle/900/600', true],
     ]
     for (const product of demoProducts) {
       await query(
-        'INSERT INTO products (name, description, price, image_url, is_active) VALUES ($1, $2, $3, $4, $5)',
+        'INSERT INTO products (name, description, price, category, image_url, is_active) VALUES ($1, $2, $3, $4, $5, $6)',
         product,
       )
     }
@@ -279,9 +344,12 @@ app.get('/api/site-content', async (req, res) => {
 app.post('/api/admin/uploads', authRequired, upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: '未上传文件' })
+    const uploaded = await persistUpload(req.file)
+    await logAction('product_image_uploaded', { admin: req.admin.username, storage: uploaded.storage, key: uploaded.key })
     res.status(201).json({
-      url: `/uploads/${req.file.filename}`,
-      filename: req.file.filename,
+      url: uploaded.url,
+      filename: uploaded.key,
+      storage: uploaded.storage,
     })
   } catch {
     res.status(500).json({ message: '上传失败' })
@@ -398,6 +466,14 @@ app.put('/api/admin/site-content', authRequired, async (req, res) => {
         .map((item) => ({ title: String(item?.title || '').trim(), text: String(item?.text || '').trim() }))
         .filter((item) => item.title && item.text)
       : defaultSiteContent().features
+    nextContent.category_sections = Array.isArray(nextContent.category_sections)
+      ? nextContent.category_sections
+        .map((item) => ({ key: String(item?.key || '').trim(), title: String(item?.title || '').trim() }))
+        .filter((item) => item.key && item.title)
+      : defaultSiteContent().category_sections
+    nextContent.featured_product_id = Number.isInteger(Number(nextContent.featured_product_id))
+      ? Number(nextContent.featured_product_id)
+      : null
 
     const existing = await getRow('SELECT id FROM site_content ORDER BY id ASC LIMIT 1')
     if (existing) {
@@ -468,15 +544,15 @@ app.get('/api/admin/products', authRequired, async (req, res) => {
 
 app.post('/api/admin/products', authRequired, async (req, res) => {
   try {
-    const { name, description, price, image_url, is_active = true } = req.body || {}
-    if (!name || !description || !image_url || !Number.isInteger(Number(price))) {
+    const { name, description, price, category = '热门补给', image_url, is_active = true } = req.body || {}
+    if (!name || !description || !image_url || !String(category).trim() || !Number.isInteger(Number(price))) {
       return res.status(400).json({ message: '请填写完整且正确的商品信息' })
     }
     const created = await getRow(
-      `INSERT INTO products (name, description, price, image_url, is_active)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO products (name, description, price, category, image_url, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-      [String(name).trim(), String(description).trim(), Number(price), String(image_url).trim(), Boolean(is_active)],
+      [String(name).trim(), String(description).trim(), Number(price), String(category).trim(), String(image_url).trim(), Boolean(is_active)],
     )
     await logAction('product_created', { id: created.id, admin: req.admin.username })
     res.status(201).json(normalizeProduct(created))
@@ -488,18 +564,19 @@ app.post('/api/admin/products', authRequired, async (req, res) => {
 app.put('/api/admin/products/:id', authRequired, async (req, res) => {
   try {
     const { id } = req.params
-    const { name, description, price, image_url, is_active } = req.body || {}
+    const { name, description, price, category, image_url, is_active } = req.body || {}
     const product = await getRow('SELECT * FROM products WHERE id = $1', [id])
     if (!product) return res.status(404).json({ message: '商品不存在' })
     const updated = await getRow(
       `UPDATE products
-       SET name = $1, description = $2, price = $3, image_url = $4, is_active = $5
-       WHERE id = $6
+       SET name = $1, description = $2, price = $3, category = $4, image_url = $5, is_active = $6
+       WHERE id = $7
        RETURNING *`,
       [
         String(name ?? product.name).trim(),
         String(description ?? product.description).trim(),
         Number.isInteger(Number(price)) ? Number(price) : product.price,
+        String(category ?? product.category).trim(),
         String(image_url ?? product.image_url).trim(),
         typeof is_active === 'boolean' ? is_active : product.is_active,
         id,
