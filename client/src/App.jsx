@@ -55,6 +55,9 @@ const storeCreditMeta = {
   credited: { text: '已入账', className: 'badge-success' },
 }
 
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+const ANNOUNCEMENT_PREVIEW_LENGTH = 140
+
 function formatMemberDiscount(rate = 1) {
   if (rate >= 1) return '无折扣'
   return `${Math.round(rate * 10)} 折`
@@ -67,6 +70,78 @@ function buildRechargeCommand(amount) {
 function getRechargeBonusAmount(amount, bonusMin = 100, bonusAmount = 10) {
   if (amount >= bonusMin) return Math.floor(amount / bonusMin) * bonusAmount
   return 0
+}
+
+function formatFileSize(size = 0) {
+  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(2)} MB`
+  if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${size} B`
+}
+
+function readImageAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result)
+    reader.onerror = () => reject(new Error('图片读取失败'))
+    reader.readAsDataURL(file)
+  })
+}
+
+function loadImageElement(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('图片加载失败'))
+    image.src = src
+  })
+}
+
+async function compressImageFile(file, maxBytes = MAX_UPLOAD_BYTES) {
+  const dataUrl = await readImageAsDataUrl(file)
+  const image = await loadImageElement(dataUrl)
+  const canvas = document.createElement('canvas')
+  const context = canvas.getContext('2d')
+  if (!context) throw new Error('浏览器不支持图片压缩')
+
+  let width = image.width
+  let height = image.height
+  let quality = 0.9
+  let scale = 1
+
+  while (scale > 0.4) {
+    canvas.width = Math.max(1, Math.round(width * scale))
+    canvas.height = Math.max(1, Math.round(height * scale))
+    context.clearRect(0, 0, canvas.width, canvas.height)
+    context.drawImage(image, 0, 0, canvas.width, canvas.height)
+
+    while (quality >= 0.45) {
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality))
+      if (blob && blob.size <= maxBytes) {
+        return new File([blob], `${file.name.replace(/\.[^.]+$/, '') || 'compressed'}-compressed.jpg`, { type: 'image/jpeg' })
+      }
+      quality -= 0.1
+    }
+
+    scale -= 0.15
+    quality = 0.82
+  }
+
+  throw new Error('压缩后图片仍然超过 10MB，请换一张更小的图片')
+}
+
+async function prepareImageUpload(file) {
+  if (!file) return null
+  if (!file.type?.startsWith('image/')) throw new Error('仅支持图片文件上传')
+  if (file.size <= MAX_UPLOAD_BYTES) {
+    return { file, originalSize: file.size, finalSize: file.size, compressed: false }
+  }
+  const compressedFile = await compressImageFile(file, MAX_UPLOAD_BYTES)
+  return {
+    file: compressedFile,
+    originalSize: file.size,
+    finalSize: compressedFile.size,
+    compressed: true,
+  }
 }
 
 function createDefaultSiteContent() {
@@ -838,7 +913,7 @@ function ProductDetailModal({ product, onAdd, onClose }) {
   )
 }
 
-function UploadDropzone({ imageUrl, loading, onFileSelect }) {
+function UploadDropzone({ imageUrl, loading, onFileSelect, uploadMeta }) {
   const [dragging, setDragging] = useState(false)
 
   const handleFiles = (files) => {
@@ -860,11 +935,18 @@ function UploadDropzone({ imageUrl, loading, onFileSelect }) {
       }}
     >
       <strong>{loading ? '上传中...' : '拖拽图片到这里上传'}</strong>
-      <p className="muted">或点击选择文件，上传后会自动写入图片 URL。</p>
+      <p className="muted">或点击选择文件，上传后会自动写入图片 URL。超过 10MB 会先尝试压缩，仍超出则禁止上传。</p>
       <label className="ghost-button upload-button">
         选择图片
         <input type="file" accept="image/*" hidden onChange={(e) => handleFiles(e.target.files)} />
       </label>
+      {uploadMeta && (
+        <div className="upload-meta-card">
+          <span>原图：{formatFileSize(uploadMeta.originalSize)}</span>
+          <span>上传：{formatFileSize(uploadMeta.finalSize)}</span>
+          <span>{uploadMeta.compressed ? '已压缩上传' : '无需压缩'}</span>
+        </div>
+      )}
       {imageUrl && <SafeImage className="upload-preview" src={imageUrl} alt="商品预览" />}
     </div>
   )
@@ -1124,6 +1206,24 @@ function CopyButton({ value, label = '复制' }) {
   return <button className="ghost-button" onClick={() => { navigator.clipboard.writeText(value); toast.success('已复制') }}>{label}</button>
 }
 
+function ExpandableAnnouncement({ content }) {
+  const [expanded, setExpanded] = useState(false)
+  const normalized = String(content || '')
+  const shouldCollapse = normalized.length > ANNOUNCEMENT_PREVIEW_LENGTH
+  const displayText = !shouldCollapse || expanded ? normalized : `${normalized.slice(0, ANNOUNCEMENT_PREVIEW_LENGTH)}...`
+
+  return (
+    <div className="announcement-expand-wrap">
+      <p className="muted announcement-body-text">{displayText}</p>
+      {shouldCollapse && (
+        <button type="button" className="text-button" onClick={() => setExpanded((current) => !current)}>
+          {expanded ? '收起公告' : '展开全文'}
+        </button>
+      )}
+    </div>
+  )
+}
+
 function FeedbackPage() {
   const [form, setForm] = useState({ contact: '', message: '' })
   const [loading, setLoading] = useState(false)
@@ -1346,6 +1446,7 @@ function MerchantCenterPage() {
   const [productForm, setProductForm] = useState(emptyProductForm)
   const [editingProductId, setEditingProductId] = useState(null)
   const [imageUploading, setImageUploading] = useState(false)
+  const [uploadMeta, setUploadMeta] = useState(null)
   const [shippingOrder, setShippingOrder] = useState(null)
   const [shippingInstruction, setShippingInstruction] = useState('')
   const userToken = localStorage.getItem('ms_user_token') || ''
@@ -1410,14 +1511,17 @@ function MerchantCenterPage() {
 
   const uploadMerchantImage = async (file) => {
     if (!file) return
-    const formData = new FormData()
-    formData.append('image', file)
     setImageUploading(true)
     try {
+      const prepared = await prepareImageUpload(file)
+      const formData = new FormData()
+      formData.append('image', prepared.file)
       const { data } = await api.post('/merchant/uploads', formData, authHeader(userToken))
       const baseHost = api.defaults.baseURL.replace(/\/api$/, '')
       const imageUrl = data.url.startsWith('http') ? data.url : `${baseHost}${data.url}`
       setProductForm((current) => ({ ...current, image_url: imageUrl }))
+      setUploadMeta(prepared)
+      if (prepared.compressed) toast.success(`图片已压缩：${formatFileSize(prepared.originalSize)} -> ${formatFileSize(prepared.finalSize)}`)
       toast.success('商品图片上传成功')
     } catch (error) {
       toast.error(error?.response?.data?.message || '图片上传失败')
@@ -1441,6 +1545,7 @@ function MerchantCenterPage() {
       toast.success('商品已上架')
     }
     setProductForm(emptyProductForm)
+    setUploadMeta(null)
     setEditingProductId(null)
     await loadDashboard()
   }
@@ -1456,6 +1561,7 @@ function MerchantCenterPage() {
       stock_quantity: String(product.stock_quantity),
       is_active: Boolean(product.is_active),
     })
+    setUploadMeta(null)
   }
 
   const deleteProduct = async (id) => {
@@ -1464,6 +1570,7 @@ function MerchantCenterPage() {
     if (editingProductId === id) {
       setEditingProductId(null)
       setProductForm(emptyProductForm)
+      setUploadMeta(null)
     }
     await loadDashboard()
   }
@@ -1532,10 +1639,10 @@ function MerchantCenterPage() {
               <label>价格<input type="number" min="0" value={productForm.price} onChange={(e) => setProductForm((current) => ({ ...current, price: e.target.value }))} /></label>
               <label>库存<input type="number" min="0" value={productForm.stock_quantity} onChange={(e) => setProductForm((current) => ({ ...current, stock_quantity: e.target.value }))} /></label>
               <label>图片 URL<input value={productForm.image_url} onChange={(e) => setProductForm((current) => ({ ...current, image_url: e.target.value }))} /></label>
-              <UploadDropzone imageUrl={productForm.image_url} loading={imageUploading} onFileSelect={uploadMerchantImage} />
+              <UploadDropzone imageUrl={productForm.image_url} loading={imageUploading} onFileSelect={uploadMerchantImage} uploadMeta={uploadMeta} />
               <label className="switch-row"><input type="checkbox" checked={productForm.is_active} onChange={(e) => setProductForm((current) => ({ ...current, is_active: e.target.checked }))} />允许上架</label>
               <div className="button-group">
-                {editingProductId && <button type="button" className="ghost-button" onClick={() => { setEditingProductId(null); setProductForm(emptyProductForm) }}>取消编辑</button>}
+                {editingProductId && <button type="button" className="ghost-button" onClick={() => { setEditingProductId(null); setProductForm(emptyProductForm); setUploadMeta(null) }}>取消编辑</button>}
                 <button className="primary-button">{editingProductId ? '保存商品' : '发布商品'}</button>
               </div>
             </form>
@@ -1731,7 +1838,7 @@ function AnnouncementsPage() {
               </div>
               {item.is_pinned && <span className="status-pill badge-warning">置顶</span>}
             </div>
-            <p className="muted announcement-body-text">{item.content}</p>
+            <ExpandableAnnouncement content={item.content} />
             <p className="muted tiny-text">发布时间：{formatTime(item.updated_at || item.created_at)}</p>
           </article>
         ))}
@@ -1796,12 +1903,14 @@ function AdminShell() {
   const [inviteUsageFilter, setInviteUsageFilter] = useState('all')
   const [userSearch, setUserSearch] = useState('')
   const [productSearch, setProductSearch] = useState('')
+  const [productOwnershipFilter, setProductOwnershipFilter] = useState('all')
   const [inviteForm, setInviteForm] = useState({ count: 1, note: '', assigned_to: '' })
   const [announcementForm, setAnnouncementForm] = useState({ title: '', content: '', is_pinned: false })
   const [productForm, setProductForm] = useState(emptyProductForm)
   const [editingProductId, setEditingProductId] = useState(null)
   const [editingAnnouncementId, setEditingAnnouncementId] = useState(null)
   const [imageUploading, setImageUploading] = useState(false)
+  const [uploadMeta, setUploadMeta] = useState(null)
   const [shipTarget, setShipTarget] = useState(null)
   const [shippingInstruction, setShippingInstruction] = useState('')
   const [confirmAction, setConfirmAction] = useState(null)
@@ -1812,6 +1921,8 @@ function AdminShell() {
   const [inviteEditModal, setInviteEditModal] = useState({ open: false, invite: null, note: '', assigned_to: '' })
   const [memberModal, setMemberModal] = useState({ open: false, user: null, member_tier: 'none', balance_delta: '0', recharge_delta: '0', note: '' })
   const [merchantModal, setMerchantModal] = useState({ open: false, user: null, is_merchant: false, store_name: '' })
+  const [payoutStatusFilter, setPayoutStatusFilter] = useState('all')
+  const [merchantSearch, setMerchantSearch] = useState('')
 
   useEffect(() => {
     const token = localStorage.getItem('ms_token')
@@ -1832,7 +1943,7 @@ function AdminShell() {
 
   const loadProducts = async () => {
     const { data } = await api.get('/admin/products')
-    setProducts(data)
+    setProducts(data.all || [])
   }
 
   const loadAdmins = async () => {
@@ -1878,12 +1989,13 @@ function AdminShell() {
 
   const filteredAdminProducts = useMemo(() => {
     const keyword = productSearch.trim().toLowerCase()
-    if (!keyword) return products
     return products.filter((product) => {
-      const text = `${product.name} ${product.category} ${product.id}`.toLowerCase()
-      return text.includes(keyword)
+      if (productOwnershipFilter === 'system' && product.owner_user_id !== null) return false
+      if (productOwnershipFilter === 'merchant' && product.owner_user_id === null) return false
+      const text = `${product.name} ${product.category} ${product.id} ${product.store_name || ''} ${product.owner_user_id ? '商家商品' : '系统商品'}`.toLowerCase()
+      return !keyword || text.includes(keyword)
     })
-  }, [productSearch, products])
+  }, [productOwnershipFilter, productSearch, products])
 
   const filteredInvites = useMemo(() => {
     if (inviteUsageFilter === 'unused') return invites.filter((invite) => !invite.is_used)
@@ -1903,7 +2015,16 @@ function AdminShell() {
       total_payout: walletLogs.filter((item) => item.change_type === 'store_payout').reduce((sum, item) => sum + Math.abs(Number(item.amount || 0)), 0),
       pending_payout_count: payouts.filter((item) => item.status === 'pending').length,
     }
-  }), [merchantOverview])
+  }).filter((merchant) => {
+    const keyword = merchantSearch.trim().toLowerCase()
+    if (!keyword) return true
+    return `${merchant.username} ${merchant.store_name}`.toLowerCase().includes(keyword)
+  }), [merchantOverview, merchantSearch])
+
+  const filteredPayoutRequests = useMemo(() => {
+    if (payoutStatusFilter === 'all') return payoutRequests
+    return payoutRequests.filter((item) => item.status === payoutStatusFilter)
+  }, [payoutRequests, payoutStatusFilter])
 
   useEffect(() => {
     if (!tokenReady) return
@@ -1976,6 +2097,7 @@ function AdminShell() {
       toast.success('商品已添加')
     }
     setProductForm(emptyProductForm)
+    setUploadMeta(null)
     setEditingProductId(null)
     loadProducts()
   }
@@ -1999,14 +2121,17 @@ function AdminShell() {
 
   const uploadImage = async (file) => {
     if (!file) return
-    const formData = new FormData()
-    formData.append('image', file)
     setImageUploading(true)
     try {
+      const prepared = await prepareImageUpload(file)
+      const formData = new FormData()
+      formData.append('image', prepared.file)
       const { data } = await api.post('/admin/uploads', formData)
       const baseHost = api.defaults.baseURL.replace(/\/api$/, '')
       const imageUrl = data.url.startsWith('http') ? data.url : `${baseHost}${data.url}`
       setProductForm((current) => ({ ...current, image_url: imageUrl }))
+      setUploadMeta(prepared)
+      if (prepared.compressed) toast.success(`图片已压缩：${formatFileSize(prepared.originalSize)} -> ${formatFileSize(prepared.finalSize)}`)
       toast.success('图片上传成功')
     } catch (error) {
       toast.error(error?.response?.data?.message || '图片上传失败')
@@ -2267,11 +2392,11 @@ function AdminShell() {
                 <label>商品分类<input value={productForm.category || ''} onChange={(e) => setProductForm((s) => ({ ...s, category: e.target.value }))} /></label>
                 <label>库存数量<input type="number" min="0" value={productForm.stock_quantity} onChange={(e) => setProductForm((s) => ({ ...s, stock_quantity: e.target.value }))} /></label>
                 <label>图片URL<input value={productForm.image_url} onChange={(e) => setProductForm((s) => ({ ...s, image_url: e.target.value }))} /></label>
-                <UploadDropzone imageUrl={productForm.image_url} loading={imageUploading} onFileSelect={uploadImage} />
+                <UploadDropzone imageUrl={productForm.image_url} loading={imageUploading} onFileSelect={uploadImage} uploadMeta={uploadMeta} />
                 <label className="switch-row"><input type="checkbox" checked={productForm.is_active} onChange={(e) => setProductForm((s) => ({ ...s, is_active: e.target.checked }))} />上架状态</label>
                 {Number(productForm.stock_quantity) === 0 && <p className="muted">库存为 0 时会自动下架，前台不会继续展示该商品。</p>}
                 <div className="button-group">
-                  {editingProductId && <button type="button" className="ghost-button" onClick={() => { setEditingProductId(null); setProductForm(emptyProductForm) }}>取消编辑</button>}
+                  {editingProductId && <button type="button" className="ghost-button" onClick={() => { setEditingProductId(null); setProductForm(emptyProductForm); setUploadMeta(null) }}>取消编辑</button>}
                   <button className="primary-button">{editingProductId ? '保存修改' : '提交商品'}</button>
                 </div>
               </form>
@@ -2279,26 +2404,33 @@ function AdminShell() {
                 <div className="section-toolbar wrap compact-toolbar">
                   <div>
                     <h3>商品列表</h3>
-                    <p className="muted">可按商品名、分类或 ID 搜索，并直接查看库存状态。</p>
+                    <p className="muted">可按系统商品或商家商品分类查看，并直接看到商家店铺名称。</p>
                   </div>
-                  <div className="search-inline">
+                  <div className="search-inline wide-search-inline">
+                    <select value={productOwnershipFilter} onChange={(e) => setProductOwnershipFilter(e.target.value)}>
+                      <option value="all">全部商品</option>
+                      <option value="system">系统商品</option>
+                      <option value="merchant">商家商品</option>
+                    </select>
                     <input placeholder="搜索商品名 / 分类 / ID" value={productSearch} onChange={(e) => setProductSearch(e.target.value)} />
                   </div>
                 </div>
                 <div className="table-wrap product-table-wrap">
                 <table>
-                  <thead><tr><th>ID</th><th>图片</th><th>名称</th><th>价格</th><th>库存</th><th>状态</th><th>操作</th></tr></thead>
+                  <thead><tr><th>ID</th><th>图片</th><th>名称</th><th>归属</th><th>店铺</th><th>价格</th><th>库存</th><th>状态</th><th>操作</th></tr></thead>
                   <tbody>
                     {filteredAdminProducts.map((product) => (
                       <tr key={product.id}>
                         <td>{product.id}</td>
                         <td><SafeImage className="thumb" src={product.image_url} alt={product.name} /></td>
                         <td>{product.name}</td>
+                        <td>{product.owner_user_id ? '商家商品' : '系统商品'}</td>
+                        <td>{product.store_name || '系统商城'}</td>
                         <td>{product.price}</td>
                         <td>{product.stock_quantity}</td>
                         <td>{product.is_active ? '上架' : '下架'}</td>
                         <td className="row-actions">
-                          <button onClick={() => { setEditingProductId(product.id); setProductForm(product) }}>编辑</button>
+                          <button onClick={() => { setEditingProductId(product.id); setProductForm(product); setUploadMeta(null) }}>编辑</button>
                           <button onClick={() => setConfirmAction({ title: '删除商品', message: `确认删除商品 ${product.name} 吗？`, onConfirm: () => deleteProduct(product.id) })}>删除</button>
                           <button onClick={() => toggleProduct(product)}>{product.is_active ? '下架' : '上架'}</button>
                         </td>
@@ -2318,6 +2450,9 @@ function AdminShell() {
                   <div>
                     <h3>商家总览</h3>
                     <p className="muted">集中查看每个商家的订单、收入、提现和当前余额。</p>
+                  </div>
+                  <div className="search-inline">
+                    <input placeholder="搜索店主 / 店铺名" value={merchantSearch} onChange={(e) => setMerchantSearch(e.target.value)} />
                   </div>
                 </div>
                 <div className="merchant-overview-cards">
@@ -2617,12 +2752,18 @@ function AdminShell() {
                   <h3>商家提现申请</h3>
                   <p className="muted">查看商家申请转入游戏内余额的记录，并执行批准或拒绝。</p>
                 </div>
+                <select value={payoutStatusFilter} onChange={(e) => setPayoutStatusFilter(e.target.value)}>
+                  <option value="all">全部状态</option>
+                  <option value="pending">待处理</option>
+                  <option value="approved">已批准</option>
+                  <option value="rejected">已拒绝</option>
+                </select>
               </div>
               <div className="table-wrap admin-table-wrap">
                 <table>
                   <thead><tr><th>ID</th><th>商家账号</th><th>店铺名</th><th>金额</th><th>备注</th><th>状态</th><th>申请时间</th><th>操作</th></tr></thead>
                   <tbody>
-                    {payoutRequests.map((item) => (
+                    {filteredPayoutRequests.map((item) => (
                       <tr key={item.id}>
                         <td>{item.id}</td>
                         <td>{item.username}</td>

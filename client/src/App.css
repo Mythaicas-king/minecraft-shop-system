@@ -188,6 +188,7 @@ button { cursor: pointer; }
 .member-actions-row { display: flex; gap: 12px; flex-wrap: wrap; }
 .announcement-page-card { display: grid; gap: 14px; }
 .announcement-body-text { white-space: pre-wrap; word-break: break-word; }
+.announcement-expand-wrap { display: grid; gap: 8px; }
 .product-card { padding: 0; overflow: hidden; }
 .product-card img, .cart-item img, .thumb { width: 100%; object-fit: cover; }
 .product-card img { height: 150px; }
@@ -269,6 +270,18 @@ button { cursor: pointer; }
 }
 .upload-dropzone.active { background: rgba(255, 170, 0, .08); border-color: rgba(255, 170, 0, .7); }
 .upload-button { position: relative; overflow: hidden; }
+.upload-meta-card {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.upload-meta-card span {
+  padding: .45rem .7rem;
+  border-radius: 999px;
+  background: rgba(255,255,255,.05);
+  border: 1px solid var(--border);
+  color: #ffe4a1;
+}
 .upload-preview { width: 100%; max-height: 180px; object-fit: cover; border-radius: 14px; }
 .drawer-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.56); display: flex; justify-content: flex-end; z-index: 50; }
 .drawer-backdrop.center { justify-content: center; align-items: center; }
@@ -306,6 +319,7 @@ button { cursor: pointer; }
 .segmented-toggle, .search-inline, .user-status-cell { display: flex; gap: 10px; }
 .segmented-toggle { flex-wrap: wrap; }
 .search-inline { align-items: center; width: min(100%, 420px); }
+.wide-search-inline { width: min(100%, 560px); }
 .search-inline input { min-width: 220px; }
 .feature-editor-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
 .feature-editor-card {

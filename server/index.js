@@ -29,6 +29,7 @@ const S3_PUBLIC_BASE_URL = process.env.S3_PUBLIC_BASE_URL || ''
 const S3_FORCE_PATH_STYLE = process.env.S3_FORCE_PATH_STYLE === 'true'
 const ORDER_SUBMIT_COOLDOWN_MS = Number(process.env.ORDER_SUBMIT_COOLDOWN_MS || 30000)
 const CAPTCHA_TTL_SECONDS = Number(process.env.CAPTCHA_TTL_SECONDS || 300)
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 const orderSubmitCooldowns = new Map()
 
@@ -75,7 +76,7 @@ const upload = multer({
       cb(null, `${Date.now()}-${randomFrom('abcdefghijklmnopqrstuvwxyz0123456789', 8)}${ext}`)
     },
   }),
-  limits: { fileSize: 5 * 1024 * 1024 },
+  limits: { fileSize: MAX_UPLOAD_BYTES },
   fileFilter: (req, file, cb) => {
     if (file.mimetype?.startsWith('image/')) cb(null, true)
     else cb(new Error('仅支持图片文件上传'))
@@ -485,6 +486,38 @@ async function createWalletLog(clientOrPool, { userId, changeType, amount, balan
      VALUES ($1, $2, $3, $4, $5, $6)`,
     [userId, changeType, amount, balanceAfter, note, createdByAdmin],
   )
+}
+
+async function cancelOrderAndRefundIfNeeded(client, order, { note = '', adminName = null } = {}) {
+  if (!order || order.status !== 'pending') return false
+
+  await client.query(
+    `UPDATE orders
+     SET status = 'cancelled', processed_at = NOW(),
+         store_credit_status = CASE WHEN merchant_user_id IS NOT NULL THEN 'none' ELSE store_credit_status END,
+         note = CASE WHEN $1 <> '' THEN TRIM(BOTH FROM CONCAT(COALESCE(note, ''), ' ', $1)) ELSE note END
+     WHERE id = $2`,
+    [String(note || '').trim(), order.id],
+  )
+
+  if (order.user_id && Number(order.paid_amount || 0) > 0) {
+    const { rows } = await client.query('SELECT * FROM users WHERE id = $1 FOR UPDATE', [order.user_id])
+    const buyer = rows[0]
+    if (buyer) {
+      const nextBalance = Number(buyer.member_balance || 0) + Number(order.paid_amount || 0)
+      await client.query('UPDATE users SET member_balance = $1 WHERE id = $2', [nextBalance, buyer.id])
+      await createWalletLog(client, {
+        userId: buyer.id,
+        changeType: 'refund',
+        amount: Number(order.paid_amount || 0),
+        balanceAfter: nextBalance,
+        note: note || `订单取消退款 ${order.order_number}`,
+        createdByAdmin: adminName,
+      })
+    }
+  }
+
+  return true
 }
 
 async function initDatabase() {
@@ -1485,7 +1518,12 @@ app.put('/api/admin/orders/:orderNo/cancel', authRequired, async (req, res) => {
     const order = await getRow('SELECT * FROM orders WHERE order_number = $1', [orderNo])
     if (!order) return res.status(404).json({ message: '订单不存在' })
     if (order.status !== 'pending') return res.status(400).json({ message: '仅待处理订单可取消' })
-    await query('UPDATE orders SET status = $1, processed_at = NOW() WHERE order_number = $2', ['cancelled', orderNo])
+    await withTransaction(async (client) => {
+      await cancelOrderAndRefundIfNeeded(client, order, {
+        note: `管理员取消订单 ${order.order_number}`,
+        adminName: req.admin.username,
+      })
+    })
     await logAction('order_cancelled', { orderNo, admin: req.admin.username })
     res.json({ message: '订单已取消' })
   } catch {
@@ -1496,7 +1534,12 @@ app.put('/api/admin/orders/:orderNo/cancel', authRequired, async (req, res) => {
 app.get('/api/admin/products', authRequired, async (req, res) => {
   try {
     const rows = await getRows('SELECT * FROM products ORDER BY id DESC')
-    res.json(rows.map(normalizeProduct))
+    const normalized = rows.map(normalizeProduct)
+    res.json({
+      all: normalized,
+      system: normalized.filter((item) => item.owner_user_id === null),
+      merchant: normalized.filter((item) => item.owner_user_id !== null),
+    })
   } catch {
     res.status(500).json({ message: '获取商品失败' })
   }
@@ -1717,16 +1760,31 @@ app.put('/api/admin/users/:id/merchant', authRequired, async (req, res) => {
     const user = await getRow('SELECT * FROM users WHERE id = $1', [id])
     if (!user) return res.status(404).json({ message: '用户不存在' })
     const nextStoreName = String(store_name || '').trim() || user.player_id
-    const updated = await getRow(
-      `UPDATE users
-       SET is_merchant = $1, store_name = $2
-       WHERE id = $3
-       RETURNING *`,
-      [is_merchant, nextStoreName, id],
-    )
-    if (is_merchant) {
-      await query('UPDATE products SET store_name = $1 WHERE owner_user_id = $2', [nextStoreName, id])
-    }
+    const updated = await withTransaction(async (client) => {
+      const updatedResult = await client.query(
+        `UPDATE users
+         SET is_merchant = $1, store_name = $2
+         WHERE id = $3
+         RETURNING *`,
+        [is_merchant, nextStoreName, id],
+      )
+      const nextUser = updatedResult.rows[0]
+
+      if (is_merchant) {
+        await client.query('UPDATE products SET store_name = $1 WHERE owner_user_id = $2', [nextStoreName, id])
+      } else {
+        await client.query('UPDATE products SET is_active = FALSE WHERE owner_user_id = $1', [id])
+        const pendingOrders = await client.query('SELECT * FROM orders WHERE merchant_user_id = $1 AND status = $2 ORDER BY id ASC', [id, 'pending'])
+        for (const order of pendingOrders.rows) {
+          await cancelOrderAndRefundIfNeeded(client, order, {
+            note: `商家权限关闭，订单自动取消并退款 ${order.order_number}`,
+            adminName: req.admin.username,
+          })
+        }
+      }
+
+      return nextUser
+    })
     await logAction(is_merchant ? 'merchant_enabled' : 'merchant_disabled', { id, admin: req.admin.username, storeName: nextStoreName })
     res.json(normalizeUser(updated))
   } catch {
@@ -1997,7 +2055,8 @@ app.put('/api/admin/admins/:id/password', authRequired, async (req, res) => {
 
 app.use((error, req, res, next) => {
   if (error instanceof multer.MulterError || error?.message === '仅支持图片文件上传') {
-    return res.status(400).json({ message: error.message })
+    const message = error.code === 'LIMIT_FILE_SIZE' ? `图片不能超过 ${Math.round(MAX_UPLOAD_BYTES / 1024 / 1024)}MB` : error.message
+    return res.status(400).json({ message })
   }
   return next(error)
 })
