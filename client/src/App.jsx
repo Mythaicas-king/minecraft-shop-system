@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { HashRouter, Link, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { HashRouter, Link, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
 import toast, { Toaster } from 'react-hot-toast'
 import { api, authHeader, setAuthToken } from './api'
 import './App.css'
@@ -43,6 +43,18 @@ const memberTierLabels = {
   gold: '黄金会员',
 }
 
+const payoutStatusMeta = {
+  pending: { text: '待处理', className: 'badge-warning' },
+  approved: { text: '已批准', className: 'badge-success' },
+  rejected: { text: '已拒绝', className: 'badge-danger' },
+}
+
+const storeCreditMeta = {
+  none: { text: '系统商城', className: 'badge-success' },
+  pending: { text: '待入账', className: 'badge-warning' },
+  credited: { text: '已入账', className: 'badge-success' },
+}
+
 function formatMemberDiscount(rate = 1) {
   if (rate >= 1) return '无折扣'
   return `${Math.round(rate * 10)} 折`
@@ -50,6 +62,11 @@ function formatMemberDiscount(rate = 1) {
 
 function buildRechargeCommand(amount) {
   return `/cmi pay Mythaicas ${amount}`
+}
+
+function getRechargeBonusAmount(amount, bonusMin = 100, bonusAmount = 10) {
+  if (amount >= bonusMin) return Math.floor(amount / bonusMin) * bonusAmount
+  return 0
 }
 
 function createDefaultSiteContent() {
@@ -96,9 +113,12 @@ function App() {
         <Route path="/admin/login" element={<AdminLoginPage />} />
         <Route path="/admin/*" element={<AdminShell />} />
         <Route path="/products" element={<Storefront page="products" />} />
+        <Route path="/stores" element={<StoreDirectoryPage />} />
+        <Route path="/stores/:storeId" element={<Storefront page="store" />} />
         <Route path="/announcements" element={<AnnouncementsPage />} />
         <Route path="/me" element={<MemberCenterPage />} />
         <Route path="/recharge" element={<RechargePage />} />
+        <Route path="/merchant" element={<MerchantCenterPage />} />
         <Route path="/feedback" element={<FeedbackPage />} />
         <Route path="*" element={<Storefront page="home" />} />
       </Routes>
@@ -128,16 +148,26 @@ function PublicNav({ currentUser, activePage = 'home' }) {
     <nav className="site-nav">
       <Link className={activePage === 'home' ? 'site-nav-link active' : 'site-nav-link'} to="/">首页</Link>
       <Link className={activePage === 'products' ? 'site-nav-link active' : 'site-nav-link'} to="/products">商品目录</Link>
+      <Link className={activePage === 'stores' ? 'site-nav-link active' : 'site-nav-link'} to="/stores">其他商家</Link>
       <Link className={activePage === 'announcements' ? 'site-nav-link active' : 'site-nav-link'} to="/announcements">公告页</Link>
       <Link className={activePage === 'feedback' ? 'site-nav-link active' : 'site-nav-link'} to="/feedback">反馈页</Link>
       {currentUser && <Link className={activePage === 'member' ? 'site-nav-link active' : 'site-nav-link'} to="/me">会员中心</Link>}
       {currentUser && <Link className={activePage === 'recharge' ? 'site-nav-link active' : 'site-nav-link'} to="/recharge">会员充值</Link>}
+      {currentUser?.is_merchant && <Link className={activePage === 'merchant' ? 'site-nav-link active' : 'site-nav-link'} to="/merchant">商家中心</Link>}
     </nav>
   )
 }
 
 function Storefront({ page = 'home' }) {
+  const { storeId } = useParams()
+  const location = useLocation()
+  const navigate = useNavigate()
+  const isStorePage = page === 'store'
   const [products, setProducts] = useState([])
+  const [storeMeta, setStoreMeta] = useState(null)
+  const [stores, setStores] = useState([])
+  const [selectedStoreId, setSelectedStoreId] = useState('')
+  const [sortMode, setSortMode] = useState('latest')
   const [siteContent, setSiteContent] = useState(createDefaultSiteContent)
   const [searchTerm, setSearchTerm] = useState('')
   const [selectedProduct, setSelectedProduct] = useState(null)
@@ -164,9 +194,47 @@ function Storefront({ page = 'home' }) {
   const [userAuthLoading, setUserAuthLoading] = useState(false)
 
   useEffect(() => {
-    api.get('/products').then(({ data }) => setProducts(data)).catch(() => toast.error('获取商品失败'))
+    if (page !== 'products') return
+    const params = new URLSearchParams(location.search)
+    setSelectedStoreId(params.get('store') || '')
+    setSortMode(params.get('sort') || 'latest')
+  }, [location.search, page])
+
+  useEffect(() => {
+    if (page !== 'products') return
+    const params = new URLSearchParams(location.search)
+    const currentStore = params.get('store') || ''
+    const currentSort = params.get('sort') || 'latest'
+    if (currentStore === selectedStoreId && currentSort === sortMode) return
+    if (selectedStoreId) params.set('store', selectedStoreId)
+    else params.delete('store')
+    if (sortMode && sortMode !== 'latest') params.set('sort', sortMode)
+    else params.delete('sort')
+    const queryString = params.toString()
+    navigate(`/products${queryString ? `?${queryString}` : ''}`, { replace: true })
+  }, [selectedStoreId, sortMode, page, location.search, navigate])
+
+  useEffect(() => {
+    const loadProducts = isStorePage
+      ? api.get(`/stores/${storeId}`).then(({ data }) => {
+        setStoreMeta(data.store)
+        setProducts(data.products || [])
+      })
+      : api.get('/products', { params: selectedStoreId ? { store_id: selectedStoreId } : {} }).then(({ data }) => {
+        setStoreMeta(null)
+        setProducts(data)
+      })
+
+    loadProducts.catch((error) => {
+      setProducts([])
+      setStoreMeta(null)
+      toast.error(error?.response?.data?.message || '获取商品失败')
+    })
+    if (!isStorePage) {
+      api.get('/stores').then(({ data }) => setStores(data)).catch(() => setStores([]))
+    }
     api.get('/site-content').then(({ data }) => setSiteContent({ ...createDefaultSiteContent(), ...data })).catch(() => {})
-  }, [])
+  }, [isStorePage, storeId, selectedStoreId])
 
   useEffect(() => {
     if (!userToken) {
@@ -222,9 +290,14 @@ function Storefront({ page = 'home' }) {
 
   const filteredProducts = useMemo(() => {
     const keyword = searchTerm.trim().toLowerCase()
-    if (!keyword) return products
-    return products.filter((product) => product.name.toLowerCase().includes(keyword))
-  }, [products, searchTerm])
+    const searched = !keyword ? products : products.filter((product) => product.name.toLowerCase().includes(keyword))
+    const sorted = [...searched]
+    if (sortMode === 'price_asc') sorted.sort((a, b) => Number(a.price) - Number(b.price))
+    else if (sortMode === 'price_desc') sorted.sort((a, b) => Number(b.price) - Number(a.price))
+    else if (sortMode === 'name') sorted.sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-CN'))
+    else sorted.sort((a, b) => Number(b.id) - Number(a.id))
+    return sorted
+  }, [products, searchTerm, sortMode])
 
   const featuredProduct = useMemo(() => {
     if (siteContent.featured_product_id) {
@@ -246,6 +319,9 @@ function Storefront({ page = 'home' }) {
     { value: '24H', label: '默认处理周期' },
     { value: 'Manual', label: '人工发货模式' },
   ]
+  const storefrontTitle = isStorePage ? (storeMeta?.store_name || '店铺详情') : page === 'products' ? '商品目录' : '商品商店'
+  const storefrontActivePage = isStorePage ? 'stores' : page === 'products' ? 'products' : 'home'
+  const selectedStoreMeta = stores.find((item) => String(item.id) === String(selectedStoreId)) || null
 
   const addToCart = (product) => {
     if (!currentUser) {
@@ -398,11 +474,11 @@ function Storefront({ page = 'home' }) {
   }
 
   return (
-    <Shell
-      title={page === 'products' ? '商品目录' : '商品商店'}
+      <Shell
+      title={storefrontTitle}
       right={
         <>
-          <PublicNav currentUser={currentUser} activePage={page === 'products' ? 'products' : 'home'} />
+          <PublicNav currentUser={currentUser} activePage={storefrontActivePage} />
           {currentUser ? (
             <>
               <span className="account-pill">{currentUser.username} · {currentUser.player_id}</span>
@@ -523,6 +599,7 @@ function Storefront({ page = 'home' }) {
               <div className="showcase-copy">
                 <p className="eyebrow">精选补给</p>
                 <h3>{product.name}</h3>
+                {product.owner_user_id ? <Link className="text-button store-link-button" to={`/stores/${product.owner_user_id}`}>{product.store_name || '系统商城'}</Link> : <p className="muted tiny-text">{product.store_name || '系统商城'}</p>}
                 <p className="muted">{product.description}</p>
                 <div className="spotlight-actions">
                   <strong>{product.price} 金币</strong>
@@ -535,19 +612,85 @@ function Storefront({ page = 'home' }) {
       )}
       </>}
 
-      {page === 'products' && <section className="catalog-toolbar panel">
+      {(page === 'products' || isStorePage) && <section className="catalog-toolbar panel">
         <div className="catalog-heading">
-          <p className="eyebrow">SHOP CATALOG</p>
-          <h3>热卖商品</h3>
-          <p className="muted">按分类浏览商品，点击卡片查看详情；登录后即可加入购物车。</p>
+          <p className="eyebrow">{isStorePage ? 'STORE DETAIL' : 'SHOP CATALOG'}</p>
+          <h3>{isStorePage ? (storeMeta?.store_name || '店铺商品') : selectedStoreMeta ? `${selectedStoreMeta.store_name} 的商品` : '热卖商品'}</h3>
+          <p className="muted">{isStorePage ? `${storeMeta?.username || '商家'} 的在售商品都在这里，支持直接加入购物车。` : selectedStoreMeta ? '你当前正在浏览指定商家的在售商品，也可以切回全部商品。' : '按分类浏览商品，点击卡片查看详情；登录后即可加入购物车。'}</p>
+          {isStorePage && storeMeta && <div className="feature-chips"><span>店主：{storeMeta.username}</span><span>{storeMeta.product_count || products.length} 件商品</span><span>{storeMeta.has_checked_in_today ? '今日已签到' : '今日未签到'}</span></div>}
+          {isStorePage && <div className="hero-actions"><Link className="ghost-button" to="/stores">返回商家广场</Link><Link className="ghost-button" to="/products">去商品目录</Link><Link className="ghost-button" to="/">直达首页</Link></div>}
         </div>
-        <label className="catalog-search">
-          <span>搜索商品</span>
-          <input placeholder="输入商品名进行搜索" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
-        </label>
+        <div className="catalog-filter-stack">
+          {!isStorePage && (
+            <label className="catalog-search">
+              <span>按店铺筛选</span>
+              <select value={selectedStoreId} onChange={(e) => setSelectedStoreId(e.target.value)}>
+                <option value="">全部店铺</option>
+                {stores.map((item) => <option key={item.id} value={item.id}>{item.store_name}</option>)}
+              </select>
+            </label>
+          )}
+          <label className="catalog-search">
+            <span>商品排序</span>
+            <select value={sortMode} onChange={(e) => setSortMode(e.target.value)}>
+              <option value="latest">最新上架</option>
+              <option value="price_asc">价格从低到高</option>
+              <option value="price_desc">价格从高到低</option>
+              <option value="name">按名称排序</option>
+            </select>
+          </label>
+          <label className="catalog-search">
+            <span>搜索商品</span>
+            <input placeholder="输入商品名进行搜索" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+          </label>
+        </div>
       </section>}
 
-      {page === 'products' && groupedProducts.map((section) => (
+      {page === 'products' && !!stores.length && (
+        <section className="panel store-filter-panel">
+          <div className="section-head compact">
+            <h3>快捷筛选店铺</h3>
+            {selectedStoreId ? <button className="ghost-button small" onClick={() => setSelectedStoreId('')}>查看全部商品</button> : <p className="muted">点击标签可只看某一家店</p>}
+          </div>
+          <div className="feature-chips store-chip-grid">
+            <button type="button" className={!selectedStoreId ? 'ghost-button small active-chip' : 'ghost-button small'} onClick={() => setSelectedStoreId('')}>全部</button>
+            {stores.map((item) => (
+              <button type="button" key={item.id} className={String(selectedStoreId) === String(item.id) ? 'ghost-button small active-chip' : 'ghost-button small'} onClick={() => setSelectedStoreId(String(item.id))}>{item.store_name}</button>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {isStorePage && storeMeta && (
+        <section className="store-info-grid">
+          <article className="panel store-profile-card">
+            <p className="eyebrow">STORE PROFILE</p>
+            <h3>{storeMeta.store_name}</h3>
+            <p className="muted">{storeMeta.store_description || '这位商家还没有填写店铺简介。'}</p>
+            <div className="feature-chips"><span>主营补给</span><span>支持网页下单</span><span>人工处理发货</span></div>
+          </article>
+          <article className="panel store-notice-card">
+            <p className="eyebrow">STORE NOTICE</p>
+            <h3>店铺公告</h3>
+            <p className="muted announcement-body-text">{storeMeta.store_notice || '当前暂无店铺公告，购买前可先查看商品详情。'}</p>
+          </article>
+          <article className="panel store-owner-card">
+            <p className="eyebrow">OWNER INFO</p>
+            <h3>{storeMeta.username}</h3>
+            <div className="mini-list">
+              <span>{storeMeta.product_count || products.length} 件在售商品</span>
+              <span>{storeMeta.has_checked_in_today ? '今日已签到' : '今日未签到'}</span>
+              <span>店铺余额 {storeMeta.store_balance || 0} 金币</span>
+            </div>
+            <div className="button-group">
+              <Link className="ghost-button" to="/stores">更多商家</Link>
+              <Link className="primary-button" to="/products">浏览全部商品</Link>
+            </div>
+          </article>
+        </section>
+      )}
+
+      {(page === 'products' || isStorePage) && groupedProducts.map((section) => (
         <section className="category-section" key={section.key}>
           <div className="section-head compact">
             <h3>{section.title}</h3>
@@ -561,7 +704,7 @@ function Storefront({ page = 'home' }) {
         </section>
       ))}
 
-      {page === 'products' && !!uncategorizedProducts.length && (
+      {(page === 'products' || isStorePage) && !!uncategorizedProducts.length && (
         <section className="category-section">
           <div className="section-head compact">
             <h3>更多商品</h3>
@@ -575,10 +718,10 @@ function Storefront({ page = 'home' }) {
         </section>
       )}
 
-      {page === 'products' && !groupedProducts.length && !uncategorizedProducts.length && (
+      {(page === 'products' || isStorePage) && !groupedProducts.length && !uncategorizedProducts.length && (
         <section className="panel empty-state catalog-empty">
-          <strong>没有找到匹配商品</strong>
-          <p className="muted">换一个商品名试试，或者清空搜索条件。</p>
+          <strong>{isStorePage ? '这家店暂时没有可展示商品' : '没有找到匹配商品'}</strong>
+          <p className="muted">{isStorePage ? '可能是商家今天未签到，或者当前商品都已下架。' : '换一个商品名试试，或者清空搜索条件。'}</p>
           <button className="ghost-button" onClick={() => setSearchTerm('')}>清空搜索</button>
         </section>
       )}
@@ -658,6 +801,8 @@ function ProductCard({ onAdd, onView, product }) {
           <button className="text-button" onClick={() => onView(product)}>商品详情</button>
         </div>
         <h4>{product.name}</h4>
+        <p className="muted tiny-text">{product.store_name || '系统商城'}</p>
+        {product.owner_user_id && <Link className="text-button store-link-button" to={`/stores/${product.owner_user_id}`}>查看店铺</Link>}
         <p>{product.description}</p>
         <div className="product-foot">
           <strong>{product.price} 金币</strong>
@@ -679,10 +824,12 @@ function ProductDetailModal({ product, onAdd, onClose }) {
           <div className="summary-card">
             <p><strong>商品名称：</strong>{product.name}</p>
             <p><strong>分类：</strong>{product.category}</p>
+            <p><strong>店铺：</strong>{product.store_name || '系统商城'}</p>
             <p><strong>价格：</strong>{product.price} 金币</p>
           </div>
           <div className="button-group">
             <button className="ghost-button" onClick={onClose}>关闭</button>
+            {product.owner_user_id && <Link className="ghost-button" to={`/stores/${product.owner_user_id}`} onClick={onClose}>进入店铺</Link>}
             <button className="primary-button" onClick={() => onAdd(product)}>加入购物车</button>
           </div>
         </div>
@@ -1144,6 +1291,367 @@ function MemberCenterPage() {
   )
 }
 
+function StoreDirectoryPage() {
+  const [stores, setStores] = useState([])
+  const user = (() => {
+    try {
+      return JSON.parse(localStorage.getItem('ms_user') || 'null')
+    } catch {
+      return null
+    }
+  })()
+
+  useEffect(() => {
+    api.get('/stores').then(({ data }) => setStores(data)).catch(() => toast.error('获取商家列表失败'))
+  }, [])
+
+  return (
+    <Shell title="其他商家" right={<PublicNav currentUser={user} activePage="stores" />}>
+      <section className="panel">
+        <div className="section-toolbar wrap">
+          <div>
+            <h3>商家广场</h3>
+            <p className="muted">查看已入驻商家与店铺状态。</p>
+          </div>
+          <Link className="ghost-button" to="/">直达首页</Link>
+        </div>
+        <div className="product-grid compact-grid">
+          {stores.map((store) => (
+            <article className="product-card panel" key={store.id}>
+              <div className="product-body">
+                <div className="product-meta-row">
+                  <span className="category-chip">商家店铺</span>
+                  <span className={`status-pill ${store.has_checked_in_today ? 'badge-success' : 'badge-warning'}`}>{store.has_checked_in_today ? '今日已签到' : '今日未签到'}</span>
+                </div>
+                <h4>{store.store_name || store.username}</h4>
+                <p className="muted tiny-text">店主：{store.username}</p>
+                <p className="muted">店铺余额：{store.store_balance || 0} 金币</p>
+                <div className="button-group">
+                  <Link className="primary-button" to={`/stores/${store.id}`}>进入店铺</Link>
+                </div>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+    </Shell>
+  )
+}
+
+function MerchantCenterPage() {
+  const [dashboard, setDashboard] = useState({ user: null, products: [], orders: [], payout_requests: [], wallet_logs: [], checked_in_today: false })
+  const [loading, setLoading] = useState(true)
+  const [storeForm, setStoreForm] = useState({ store_name: '', store_description: '', store_notice: '' })
+  const [payoutForm, setPayoutForm] = useState({ amount: '0', note: '' })
+  const [productForm, setProductForm] = useState(emptyProductForm)
+  const [editingProductId, setEditingProductId] = useState(null)
+  const [imageUploading, setImageUploading] = useState(false)
+  const [shippingOrder, setShippingOrder] = useState(null)
+  const [shippingInstruction, setShippingInstruction] = useState('')
+  const userToken = localStorage.getItem('ms_user_token') || ''
+
+  const syncStoredUser = (nextUser) => {
+    if (!nextUser) return
+    localStorage.setItem('ms_user', JSON.stringify(nextUser))
+  }
+
+  const loadDashboard = async () => {
+    const { data } = await api.get('/merchant/dashboard', authHeader(userToken))
+    setDashboard(data)
+    setStoreForm({
+      store_name: data.user?.store_name || '',
+      store_description: data.user?.store_description || '',
+      store_notice: data.user?.store_notice || '',
+    })
+    syncStoredUser(data.user)
+    return data
+  }
+
+  useEffect(() => {
+    if (!userToken) {
+      setLoading(false)
+      return
+    }
+    loadDashboard()
+      .catch((error) => toast.error(error?.response?.data?.message || '加载商家中心失败'))
+      .finally(() => setLoading(false))
+  }, [userToken])
+
+  const saveStore = async (event) => {
+    event.preventDefault()
+    const { data } = await api.put('/merchant/store', {
+      store_name: storeForm.store_name.trim(),
+      store_description: storeForm.store_description.trim(),
+      store_notice: storeForm.store_notice.trim(),
+    }, authHeader(userToken))
+    setDashboard((current) => ({ ...current, user: data }))
+    setStoreForm({
+      store_name: data.store_name || '',
+      store_description: data.store_description || '',
+      store_notice: data.store_notice || '',
+    })
+    syncStoredUser(data)
+    toast.success('店铺信息已更新')
+  }
+
+  const checkIn = async () => {
+    await api.post('/merchant/check-in', {}, authHeader(userToken))
+    await loadDashboard()
+    toast.success('今日签到成功')
+  }
+
+  const requestPayout = async (event) => {
+    event.preventDefault()
+    await api.post('/merchant/payout-requests', { amount: Number(payoutForm.amount), note: payoutForm.note.trim() }, authHeader(userToken))
+    await loadDashboard()
+    toast.success('提现申请已提交')
+    setPayoutForm({ amount: '0', note: '' })
+  }
+
+  const uploadMerchantImage = async (file) => {
+    if (!file) return
+    const formData = new FormData()
+    formData.append('image', file)
+    setImageUploading(true)
+    try {
+      const { data } = await api.post('/merchant/uploads', formData, authHeader(userToken))
+      const baseHost = api.defaults.baseURL.replace(/\/api$/, '')
+      const imageUrl = data.url.startsWith('http') ? data.url : `${baseHost}${data.url}`
+      setProductForm((current) => ({ ...current, image_url: imageUrl }))
+      toast.success('商品图片上传成功')
+    } catch (error) {
+      toast.error(error?.response?.data?.message || '图片上传失败')
+    } finally {
+      setImageUploading(false)
+    }
+  }
+
+  const submitProduct = async (event) => {
+    event.preventDefault()
+    const payload = {
+      ...productForm,
+      price: Number(productForm.price),
+      stock_quantity: Number(productForm.stock_quantity),
+    }
+    if (editingProductId) {
+      await api.put(`/merchant/products/${editingProductId}`, payload, authHeader(userToken))
+      toast.success('商品已更新')
+    } else {
+      await api.post('/merchant/products', payload, authHeader(userToken))
+      toast.success('商品已上架')
+    }
+    setProductForm(emptyProductForm)
+    setEditingProductId(null)
+    await loadDashboard()
+  }
+
+  const editProduct = (product) => {
+    setEditingProductId(product.id)
+    setProductForm({
+      name: product.name,
+      description: product.description,
+      price: String(product.price),
+      category: product.category,
+      image_url: product.image_url,
+      stock_quantity: String(product.stock_quantity),
+      is_active: Boolean(product.is_active),
+    })
+  }
+
+  const deleteProduct = async (id) => {
+    await api.delete(`/merchant/products/${id}`, authHeader(userToken))
+    toast.success('商品已删除')
+    if (editingProductId === id) {
+      setEditingProductId(null)
+      setProductForm(emptyProductForm)
+    }
+    await loadDashboard()
+  }
+
+  const toggleProduct = async (product) => {
+    if (!product.is_active && Number(product.stock_quantity) <= 0) {
+      toast.error('库存为 0 的商品不能上架')
+      return
+    }
+    await api.put(`/merchant/products/${product.id}`, { ...product, is_active: !product.is_active }, authHeader(userToken))
+    toast.success('商品状态已更新')
+    await loadDashboard()
+  }
+
+  const submitShipping = async () => {
+    if (!shippingOrder) return
+    if (!shippingInstruction.trim()) {
+      toast.error('请输入发放指令')
+      return
+    }
+    await api.put(`/merchant/orders/${shippingOrder.order_number}/ship`, { shipping_instruction: shippingInstruction.trim() }, authHeader(userToken))
+    toast.success('订单已发货，收入已更新')
+    setShippingOrder(null)
+    setShippingInstruction('')
+    await loadDashboard()
+  }
+
+  const user = dashboard.user
+  const paidOutTotal = dashboard.wallet_logs
+    .filter((item) => item.change_type === 'store_payout')
+    .reduce((sum, item) => sum + Math.abs(Number(item.amount || 0)), 0)
+  const incomeTotal = dashboard.wallet_logs
+    .filter((item) => item.change_type === 'store_income')
+    .reduce((sum, item) => sum + Number(item.amount || 0), 0)
+
+  if (!userToken) {
+    return <Shell title="商家中心" right={<PublicNav currentUser={null} activePage="merchant" />}><section className="panel empty-state"><strong>请先登录</strong><p className="muted">商家中心仅对已开通商家权限的账号开放。</p><Link className="primary-button" to="/">直达首页</Link></section></Shell>
+  }
+
+  if (!loading && !user?.is_merchant) {
+    return <Shell title="商家中心" right={<PublicNav currentUser={user} activePage="merchant" />}><section className="panel empty-state"><strong>你还没有商家权限</strong><p className="muted">请联系管理员在后台为你的账号开通商家入驻资格。</p><Link className="primary-button" to="/">直达首页</Link></section></Shell>
+  }
+
+  return (
+    <Shell title="商家中心" right={<PublicNav currentUser={user} activePage="merchant" />}>
+      <section className="member-layout">
+        <div className="panel member-summary-grid">
+          <div className="member-summary-card"><p className="eyebrow">MERCHANT PROFILE</p><h2>{user?.store_name || user?.username || '加载中...'}</h2><p className="muted">店主：{user?.username || '-'}</p></div>
+          <div className="stat-card"><strong>{user?.store_balance || 0}</strong><span>店铺余额</span></div>
+          <div className="stat-card"><strong>{incomeTotal}</strong><span>累计收入</span></div>
+          <div className="stat-card"><strong>{paidOutTotal}</strong><span>累计转出</span></div>
+        </div>
+        <div className="member-actions-row">
+          <button className="primary-button" onClick={checkIn} disabled={loading || dashboard.checked_in_today}>{dashboard.checked_in_today ? '今日已签到' : '每日签到'}</button>
+          <Link className="ghost-button" to="/stores">查看其他商家</Link>
+          <Link className="ghost-button" to="/">直达首页</Link>
+        </div>
+        <div className="split-panel merchant-dashboard-grid">
+          <section className="panel form-grid product-editor-form">
+            <h3>{editingProductId ? '编辑商品' : '发布商品'}</h3>
+            <p className="muted">{dashboard.checked_in_today ? '今天已签到，库存充足的商品可以正常上架。' : '今日未签到，提交商品后会先保持下架，签到后才会自动恢复。'}</p>
+            <form className="form-grid" onSubmit={submitProduct}>
+              <label>商品名称<input value={productForm.name} onChange={(e) => setProductForm((current) => ({ ...current, name: e.target.value }))} /></label>
+              <label>商品描述<textarea value={productForm.description} onChange={(e) => setProductForm((current) => ({ ...current, description: e.target.value }))} /></label>
+              <label>商品分类<input value={productForm.category} onChange={(e) => setProductForm((current) => ({ ...current, category: e.target.value }))} /></label>
+              <label>价格<input type="number" min="0" value={productForm.price} onChange={(e) => setProductForm((current) => ({ ...current, price: e.target.value }))} /></label>
+              <label>库存<input type="number" min="0" value={productForm.stock_quantity} onChange={(e) => setProductForm((current) => ({ ...current, stock_quantity: e.target.value }))} /></label>
+              <label>图片 URL<input value={productForm.image_url} onChange={(e) => setProductForm((current) => ({ ...current, image_url: e.target.value }))} /></label>
+              <UploadDropzone imageUrl={productForm.image_url} loading={imageUploading} onFileSelect={uploadMerchantImage} />
+              <label className="switch-row"><input type="checkbox" checked={productForm.is_active} onChange={(e) => setProductForm((current) => ({ ...current, is_active: e.target.checked }))} />允许上架</label>
+              <div className="button-group">
+                {editingProductId && <button type="button" className="ghost-button" onClick={() => { setEditingProductId(null); setProductForm(emptyProductForm) }}>取消编辑</button>}
+                <button className="primary-button">{editingProductId ? '保存商品' : '发布商品'}</button>
+              </div>
+            </form>
+          </section>
+          <div className="product-list-panel">
+            <section className="panel form-grid merchant-settings-panel">
+              <div className="section-toolbar wrap compact-toolbar"><div><h3>店铺设置</h3><p className="muted">修改店名后，店铺商品会同步显示新的店铺名称。</p></div></div>
+              <form className="form-grid" onSubmit={saveStore}>
+                <label>店名<input value={storeForm.store_name} onChange={(e) => setStoreForm((current) => ({ ...current, store_name: e.target.value }))} /></label>
+                <label>店铺简介<textarea value={storeForm.store_description} onChange={(e) => setStoreForm((current) => ({ ...current, store_description: e.target.value }))} placeholder="介绍你的主营内容、风格或服务特色" /></label>
+                <label>店铺公告<textarea value={storeForm.store_notice} onChange={(e) => setStoreForm((current) => ({ ...current, store_notice: e.target.value }))} placeholder="例如：发货时间、活动说明、购买须知" /></label>
+                <button className="primary-button">保存店铺信息</button>
+              </form>
+            </section>
+            <section className="panel form-grid merchant-settings-panel">
+              <div className="section-toolbar wrap compact-toolbar"><div><h3>申请转入游戏</h3><p className="muted">提交后等待管理员审核，批准后会从店铺余额扣除相应金额。</p></div></div>
+              <form className="form-grid" onSubmit={requestPayout}>
+                <label>申请金额<input type="number" min="1" value={payoutForm.amount} onChange={(e) => setPayoutForm((current) => ({ ...current, amount: e.target.value }))} /></label>
+                <label>备注<textarea value={payoutForm.note} onChange={(e) => setPayoutForm((current) => ({ ...current, note: e.target.value }))} /></label>
+                <button className="primary-button">提交申请</button>
+              </form>
+            </section>
+          </div>
+        </div>
+        <section className="panel">
+          <div className="section-toolbar wrap"><div><h3>商品列表</h3><p className="muted">你可以直接查看商品库存、上下架状态，并快速进入编辑。</p></div></div>
+          <div className="table-wrap admin-table-wrap">
+            <table>
+              <thead><tr><th>ID</th><th>商品</th><th>价格</th><th>库存</th><th>状态</th><th>操作</th></tr></thead>
+              <tbody>
+                {dashboard.products.length ? dashboard.products.map((item) => (
+                  <tr key={item.id}>
+                    <td>{item.id}</td>
+                    <td><div className="merchant-product-cell"><SafeImage className="thumb" src={item.image_url} alt={item.name} /><div><strong>{item.name}</strong><div className="muted tiny-text">{item.category} · {item.store_name || '系统商城'}</div></div></div></td>
+                    <td>{item.price}</td>
+                    <td>{item.stock_quantity}</td>
+                    <td><span className={`status-pill ${item.is_active ? 'badge-success' : 'badge-danger'}`}>{item.is_active ? '上架中' : '已下架'}</span></td>
+                    <td className="row-actions"><button onClick={() => editProduct(item)}>编辑</button><button onClick={() => deleteProduct(item.id)}>删除</button><button onClick={() => toggleProduct(item)}>{item.is_active ? '下架' : '上架'}</button></td>
+                  </tr>
+                )) : <tr><td colSpan="6">暂无商品，先发布第一件商品吧。</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <section className="panel">
+          <div className="section-toolbar wrap"><div><h3>商家订单</h3><p className="muted">查看属于你店铺的历史订单、收入状态，并对待处理订单执行发货。</p></div></div>
+          <div className="table-wrap admin-table-wrap">
+            <table>
+              <thead><tr><th>订单号</th><th>玩家</th><th>商品</th><th>实付</th><th>商家收入</th><th>入账状态</th><th>订单状态</th><th>时间</th><th>操作</th></tr></thead>
+              <tbody>
+                {dashboard.orders.length ? dashboard.orders.map((item) => {
+                  const creditMeta = storeCreditMeta[item.store_credit_status] || storeCreditMeta.pending
+                  return (
+                    <tr key={item.order_number}>
+                      <td>{item.order_number}</td>
+                      <td>{item.player_id}</td>
+                      <td>{item.items.map((entry) => `${entry.name} x${entry.quantity}`).join('，')}</td>
+                      <td>{item.paid_amount || item.total_price}</td>
+                      <td>{item.merchant_income || 0}</td>
+                      <td><span className={`status-pill ${creditMeta.className}`}>{creditMeta.text}</span></td>
+                      <td><span className={`status-pill ${orderStatusLabels[item.status]?.className || 'badge-warning'}`}>{orderStatusLabels[item.status]?.text || item.status}</span></td>
+                      <td>{formatTime(item.created_at)}</td>
+                      <td className="row-actions"><button disabled={item.status !== 'pending'} onClick={() => { setShippingOrder(item); setShippingInstruction(`/give ${item.player_id} diamond 64`) }}>立即发货</button></td>
+                    </tr>
+                  )
+                }) : <tr><td colSpan="9">暂无商家订单</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <div className="split-panel merchant-dashboard-grid">
+          <section className="panel">
+            <div className="section-toolbar wrap"><div><h3>店铺流水</h3><p className="muted">收入入账和提现扣款都会记录在这里。</p></div></div>
+            <div className="table-wrap admin-table-wrap">
+              <table>
+                <thead><tr><th>时间</th><th>类型</th><th>变动</th><th>余额</th><th>备注</th></tr></thead>
+                <tbody>
+                  {dashboard.wallet_logs.length ? dashboard.wallet_logs.map((item) => (
+                    <tr key={item.id}><td>{formatTime(item.created_at)}</td><td>{item.change_type}</td><td>{item.amount > 0 ? `+${item.amount}` : item.amount}</td><td>{item.balance_after}</td><td>{item.note || '-'}</td></tr>
+                  )) : <tr><td colSpan="5">暂无店铺流水</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </section>
+          <section className="panel">
+            <div className="section-toolbar wrap"><div><h3>提现记录</h3><p className="muted">这里显示你提交过的转入游戏申请及处理结果。</p></div></div>
+            <div className="table-wrap admin-table-wrap">
+              <table>
+                <thead><tr><th>ID</th><th>金额</th><th>备注</th><th>状态</th><th>审核人</th><th>申请时间</th></tr></thead>
+                <tbody>
+                  {dashboard.payout_requests.length ? dashboard.payout_requests.map((item) => {
+                    const meta = payoutStatusMeta[item.status] || payoutStatusMeta.pending
+                    return <tr key={item.id}><td>{item.id}</td><td>{item.amount}</td><td>{item.note || '-'}</td><td><span className={`status-pill ${meta.className}`}>{meta.text}</span></td><td>{item.reviewed_by_admin || '-'}</td><td>{formatTime(item.requested_at)}</td></tr>
+                  }) : <tr><td colSpan="6">暂无提现申请</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+      {shippingOrder && (
+        <ModalFrame title={`商家发货：${shippingOrder.order_number}`} onClose={() => setShippingOrder(null)}>
+          <div className="form-grid">
+            <p className="muted">提交后该订单会变为已发货，若该订单收入未入账，将自动增加到你的店铺余额。</p>
+            <textarea value={shippingInstruction} onChange={(e) => setShippingInstruction(e.target.value)} />
+            <div className="button-group">
+              <button className="ghost-button" onClick={() => setShippingOrder(null)}>取消</button>
+              <button className="primary-button" onClick={submitShipping}>确认发货</button>
+            </div>
+          </div>
+        </ModalFrame>
+      )}
+    </Shell>
+  )
+}
+
 function RechargePage() {
   const [siteContent, setSiteContent] = useState(createDefaultSiteContent)
   const [amount, setAmount] = useState('100')
@@ -1280,6 +1788,8 @@ function AdminShell() {
   const [invites, setInvites] = useState([])
   const [feedbacks, setFeedbacks] = useState([])
   const [announcements, setAnnouncements] = useState([])
+  const [payoutRequests, setPayoutRequests] = useState([])
+  const [merchantOverview, setMerchantOverview] = useState({ merchants: [], orders: [], payout_requests: [], wallet_logs: [] })
   const [siteContentForm, setSiteContentForm] = useState(createDefaultSiteContent)
   const [statusFilter, setStatusFilter] = useState('all')
   const [feedbackStatusFilter, setFeedbackStatusFilter] = useState('all')
@@ -1301,6 +1811,7 @@ function AdminShell() {
   const [banModal, setBanModal] = useState({ open: false, user: null, reason: '', nextStatus: true })
   const [inviteEditModal, setInviteEditModal] = useState({ open: false, invite: null, note: '', assigned_to: '' })
   const [memberModal, setMemberModal] = useState({ open: false, user: null, member_tier: 'none', balance_delta: '0', recharge_delta: '0', note: '' })
+  const [merchantModal, setMerchantModal] = useState({ open: false, user: null, is_merchant: false, store_name: '' })
 
   useEffect(() => {
     const token = localStorage.getItem('ms_token')
@@ -1350,6 +1861,16 @@ function AdminShell() {
     setAnnouncements(data)
   }
 
+  const loadPayoutRequests = async () => {
+    const { data } = await api.get('/admin/payout-requests')
+    setPayoutRequests(data)
+  }
+
+  const loadMerchantOverview = async () => {
+    const { data } = await api.get('/admin/merchant-overview')
+    setMerchantOverview(data)
+  }
+
   const loadSiteContent = async () => {
     const { data } = await api.get('/admin/site-content')
     setSiteContentForm({ ...createDefaultSiteContent(), ...data })
@@ -1370,6 +1891,20 @@ function AdminShell() {
     return invites
   }, [inviteUsageFilter, invites])
 
+  const merchantSummaries = useMemo(() => merchantOverview.merchants.map((merchant) => {
+    const orders = merchantOverview.orders.filter((item) => Number(item.merchant_user_id) === Number(merchant.id))
+    const walletLogs = merchantOverview.wallet_logs.filter((item) => Number(item.user_id) === Number(merchant.id))
+    const payouts = merchantOverview.payout_requests.filter((item) => Number(item.user_id) === Number(merchant.id))
+    return {
+      ...merchant,
+      order_count: orders.length,
+      pending_order_count: orders.filter((item) => item.status === 'pending').length,
+      total_income: walletLogs.filter((item) => item.change_type === 'store_income').reduce((sum, item) => sum + Number(item.amount || 0), 0),
+      total_payout: walletLogs.filter((item) => item.change_type === 'store_payout').reduce((sum, item) => sum + Math.abs(Number(item.amount || 0)), 0),
+      pending_payout_count: payouts.filter((item) => item.status === 'pending').length,
+    }
+  }), [merchantOverview])
+
   useEffect(() => {
     if (!tokenReady) return
     if (section === 'orders') loadOrders().catch(() => toast.error('加载订单失败'))
@@ -1379,6 +1914,8 @@ function AdminShell() {
     if (section === 'invites') loadInvites().catch(() => toast.error('加载邀请码失败'))
     if (section === 'feedbacks') loadFeedbacks().catch(() => toast.error('加载反馈失败'))
     if (section === 'announcements') loadAnnouncements().catch(() => toast.error('加载公告失败'))
+    if (section === 'payouts') loadPayoutRequests().catch(() => toast.error('加载提现申请失败'))
+    if (section === 'merchants') loadMerchantOverview().catch(() => toast.error('加载商家总览失败'))
     if (section === 'content') {
       loadSiteContent().catch(() => toast.error('加载页面内容失败'))
       loadProducts().catch(() => toast.error('加载商品失败'))
@@ -1392,7 +1929,7 @@ function AdminShell() {
 
   useEffect(() => {
     const path = location.pathname.split('/').at(-1)
-    if (['orders', 'products', 'users', 'invites', 'feedbacks', 'announcements', 'admins', 'content'].includes(path)) setSection(path)
+    if (['orders', 'products', 'users', 'invites', 'feedbacks', 'announcements', 'admins', 'content', 'payouts', 'merchants'].includes(path)) setSection(path)
   }, [location.pathname])
 
   if (!tokenReady) return null
@@ -1602,6 +2139,24 @@ function AdminShell() {
     loadUsers()
   }
 
+  const submitMerchantUpdate = async (event) => {
+    event.preventDefault()
+    if (!merchantModal.user) return
+    await api.put(`/admin/users/${merchantModal.user.id}/merchant`, {
+      is_merchant: merchantModal.is_merchant,
+      store_name: merchantModal.store_name.trim(),
+    })
+    toast.success('商家权限已更新')
+    setMerchantModal({ open: false, user: null, is_merchant: false, store_name: '' })
+    loadUsers()
+  }
+
+  const reviewPayoutRequest = async (item, status) => {
+    await api.put(`/admin/payout-requests/${item.id}/status`, { status })
+    toast.success(status === 'approved' ? '提现申请已批准' : '提现申请已拒绝')
+    loadPayoutRequests()
+  }
+
   const submitAnnouncement = async (event) => {
     event.preventDefault()
     if (!announcementForm.title.trim() || !announcementForm.content.trim()) {
@@ -1651,9 +2206,11 @@ function AdminShell() {
           <button className={section === 'orders' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/orders')}>订单管理</button>
           <button className={section === 'products' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/products')}>商品管理</button>
           <button className={section === 'users' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/users')}>用户管理</button>
+          <button className={section === 'merchants' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/merchants')}>商家总览</button>
           <button className={section === 'invites' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/invites')}>邀请码管理</button>
           <button className={section === 'feedbacks' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/feedbacks')}>反馈管理</button>
           <button className={section === 'announcements' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/announcements')}>公告管理</button>
+          <button className={section === 'payouts' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/payouts')}>提现审核</button>
           <button className={section === 'content' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/content')}>内容管理</button>
           <button className={section === 'admins' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('/admin/admins')}>管理员管理</button>
         </aside>
@@ -1675,13 +2232,14 @@ function AdminShell() {
               <div className="table-wrap admin-table-wrap">
                 <table>
                   <thead>
-                    <tr><th>订单号</th><th>关联账号</th><th>游戏ID</th><th>商品</th><th>总价</th><th>状态</th><th>提交时间</th><th>操作</th></tr>
+                    <tr><th>订单号</th><th>关联账号</th><th>店铺</th><th>游戏ID</th><th>商品</th><th>总价</th><th>状态</th><th>提交时间</th><th>操作</th></tr>
                   </thead>
                   <tbody>
                     {orders.map((order) => (
                       <tr key={order.order_number}>
                         <td>{order.order_number}</td>
                         <td>{order.account_username || '-'}</td>
+                        <td>{order.merchant_store_name || '系统商城'}</td>
                         <td>{order.player_id}</td>
                         <td>{order.items.map((item) => `${item.name} x${item.quantity}`).join('，')}</td>
                         <td>{order.total_price}</td>
@@ -1749,6 +2307,61 @@ function AdminShell() {
                   </tbody>
                 </table>
                 </div>
+              </div>
+            </section>
+          )}
+
+          {section === 'merchants' && (
+            <section className="content-column">
+              <div className="panel">
+                <div className="section-toolbar wrap">
+                  <div>
+                    <h3>商家总览</h3>
+                    <p className="muted">集中查看每个商家的订单、收入、提现和当前余额。</p>
+                  </div>
+                </div>
+                <div className="merchant-overview-cards">
+                  {merchantSummaries.map((item) => (
+                    <article className="stat-card merchant-overview-card" key={item.id}>
+                      <strong>{item.store_name || item.username}</strong>
+                      <span>店主：{item.username}</span>
+                      <span>当前余额：{item.store_balance || 0}</span>
+                      <span>订单数：{item.order_count}（待处理 {item.pending_order_count}）</span>
+                      <span>累计收入：{item.total_income}</span>
+                      <span>累计转出：{item.total_payout}</span>
+                      <span>待审核提现：{item.pending_payout_count}</span>
+                    </article>
+                  ))}
+                </div>
+              </div>
+              <div className="split-panel merchant-dashboard-grid">
+                <section className="panel">
+                  <div className="section-toolbar wrap"><div><h3>商家订单汇总</h3><p className="muted">快速查看每笔商家订单归属、收入金额和入账状态。</p></div></div>
+                  <div className="table-wrap admin-table-wrap">
+                    <table>
+                      <thead><tr><th>订单号</th><th>店铺</th><th>玩家</th><th>实付</th><th>商家收入</th><th>入账状态</th><th>状态</th><th>时间</th></tr></thead>
+                      <tbody>
+                        {merchantOverview.orders.map((item) => {
+                          const creditMeta = storeCreditMeta[item.store_credit_status] || storeCreditMeta.pending
+                          return <tr key={item.order_number}><td>{item.order_number}</td><td>{item.merchant_store_name}</td><td>{item.player_id}</td><td>{item.paid_amount || item.total_price}</td><td>{item.merchant_income || 0}</td><td><span className={`status-pill ${creditMeta.className}`}>{creditMeta.text}</span></td><td><span className={`status-pill ${orderStatusLabels[item.status]?.className || 'badge-warning'}`}>{orderStatusLabels[item.status]?.text || item.status}</span></td><td>{formatTime(item.created_at)}</td></tr>
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+                <section className="panel">
+                  <div className="section-toolbar wrap"><div><h3>商家流水汇总</h3><p className="muted">收入入账与提现扣款都会记录在这里，便于核对账目。</p></div></div>
+                  <div className="table-wrap admin-table-wrap">
+                    <table>
+                      <thead><tr><th>时间</th><th>用户ID</th><th>类型</th><th>变动</th><th>余额</th><th>备注</th></tr></thead>
+                      <tbody>
+                        {merchantOverview.wallet_logs.map((item) => (
+                          <tr key={item.id}><td>{formatTime(item.created_at)}</td><td>{item.user_id}</td><td>{item.change_type}</td><td>{item.amount > 0 ? `+${item.amount}` : item.amount}</td><td>{item.balance_after}</td><td>{item.note || '-'}</td></tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
               </div>
             </section>
           )}
@@ -1870,7 +2483,7 @@ function AdminShell() {
               </div>
               <div className="table-wrap admin-table-wrap">
                 <table>
-                  <thead><tr><th>账号名</th><th>游戏ID</th><th>邀请码</th><th>会员</th><th>余额</th><th>累计充值</th><th>邮箱</th><th>状态</th><th>最近登录</th><th>操作</th></tr></thead>
+                  <thead><tr><th>账号名</th><th>游戏ID</th><th>邀请码</th><th>会员</th><th>商家</th><th>余额</th><th>累计充值</th><th>邮箱</th><th>状态</th><th>最近登录</th><th>操作</th></tr></thead>
                   <tbody>
                     {users.map((item) => (
                       <tr key={item.id}>
@@ -1878,6 +2491,7 @@ function AdminShell() {
                         <td>{item.player_id}</td>
                         <td><code>{item.invite_code || '-'}</code></td>
                         <td>{memberTierLabels[item.member_tier] || '普通会员'}</td>
+                        <td>{item.is_merchant ? (item.store_name || '已开通') : '未开通'}</td>
                         <td>{item.member_balance || 0}</td>
                         <td>{item.total_recharge || 0}</td>
                         <td>{item.email || '-'}</td>
@@ -1890,6 +2504,7 @@ function AdminShell() {
                         <td>{formatTime(item.last_login_at)}</td>
                         <td className="row-actions">
                           <button onClick={() => setMemberModal({ open: true, user: item, member_tier: item.member_tier || 'none', balance_delta: '0', recharge_delta: '0', note: '' })}>会员设置</button>
+                          <button onClick={() => setMerchantModal({ open: true, user: item, is_merchant: Boolean(item.is_merchant), store_name: item.store_name || item.player_id || '' })}>商家设置</button>
                           {item.is_banned ? (
                             <button onClick={() => setBanModal({ open: true, user: item, reason: '', nextStatus: false })}>解除封禁</button>
                           ) : (
@@ -1991,6 +2606,39 @@ function AdminShell() {
                   </tbody>
                 </table>
                 </div>
+              </div>
+            </section>
+          )}
+
+          {section === 'payouts' && (
+            <section className="panel">
+              <div className="section-toolbar wrap">
+                <div>
+                  <h3>商家提现申请</h3>
+                  <p className="muted">查看商家申请转入游戏内余额的记录，并执行批准或拒绝。</p>
+                </div>
+              </div>
+              <div className="table-wrap admin-table-wrap">
+                <table>
+                  <thead><tr><th>ID</th><th>商家账号</th><th>店铺名</th><th>金额</th><th>备注</th><th>状态</th><th>申请时间</th><th>操作</th></tr></thead>
+                  <tbody>
+                    {payoutRequests.map((item) => (
+                      <tr key={item.id}>
+                        <td>{item.id}</td>
+                        <td>{item.username}</td>
+                        <td>{item.store_name}</td>
+                        <td>{item.amount}</td>
+                        <td>{item.note || '-'}</td>
+                        <td><span className={`status-pill ${(payoutStatusMeta[item.status] || payoutStatusMeta.pending).className}`}>{(payoutStatusMeta[item.status] || payoutStatusMeta.pending).text}</span></td>
+                        <td>{formatTime(item.requested_at)}</td>
+                        <td className="row-actions">
+                          <button disabled={item.status !== 'pending'} onClick={() => reviewPayoutRequest(item, 'approved')}>批准</button>
+                          <button disabled={item.status !== 'pending'} onClick={() => reviewPayoutRequest(item, 'rejected')}>拒绝</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </section>
           )}
@@ -2128,6 +2776,19 @@ function AdminShell() {
             <div className="button-group">
               <button type="button" className="ghost-button" onClick={() => setMemberModal({ open: false, user: null, member_tier: 'none', balance_delta: '0', recharge_delta: '0', note: '' })}>取消</button>
               <button className="primary-button">保存会员资料</button>
+            </div>
+          </form>
+        </ModalFrame>
+      )}
+
+      {merchantModal.open && merchantModal.user && (
+        <ModalFrame title={`商家设置：${merchantModal.user.username}`} onClose={() => setMerchantModal({ open: false, user: null, is_merchant: false, store_name: '' })}>
+          <form className="form-grid" onSubmit={submitMerchantUpdate}>
+            <label className="switch-row"><input type="checkbox" checked={merchantModal.is_merchant} onChange={(e) => setMerchantModal((current) => ({ ...current, is_merchant: e.target.checked }))} />开通商家权限</label>
+            <label>店铺名称<input value={merchantModal.store_name} onChange={(e) => setMerchantModal((current) => ({ ...current, store_name: e.target.value }))} /></label>
+            <div className="button-group">
+              <button type="button" className="ghost-button" onClick={() => setMerchantModal({ open: false, user: null, is_merchant: false, store_name: '' })}>取消</button>
+              <button className="primary-button">保存商家设置</button>
             </div>
           </form>
         </ModalFrame>

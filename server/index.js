@@ -311,6 +311,13 @@ async function userAuthRequired(req, res, next) {
   return next()
 }
 
+async function merchantRequired(req, res, next) {
+  await userAuthRequired(req, res, () => {})
+  if (res.headersSent) return
+  if (!req.user?.is_merchant) return res.status(403).json({ message: '你还没有商家入驻权限' })
+  return next()
+}
+
 function normalizeProduct(row) {
   return {
     id: row.id,
@@ -320,6 +327,8 @@ function normalizeProduct(row) {
     category: row.category,
     image_url: row.image_url,
     stock_quantity: row.stock_quantity,
+    owner_user_id: row.owner_user_id,
+    store_name: row.store_name || '系统商城',
     is_active: row.is_active,
     created_at: row.created_at,
   }
@@ -337,6 +346,10 @@ function normalizeOrder(row) {
     discount_amount: row.discount_amount ?? 0,
     member_tier: row.member_tier || 'none',
     member_discount_rate: Number(row.member_discount_rate || 1),
+    merchant_user_id: row.merchant_user_id,
+    merchant_store_name: row.merchant_store_name || '系统商城',
+    merchant_income: row.merchant_income ?? (row.paid_amount ?? row.total_price),
+    store_credit_status: row.store_credit_status || 'none',
     status: row.status,
     note: row.note,
     email: row.email,
@@ -361,6 +374,12 @@ function normalizeUser(row) {
     member_discount_rate: tierMeta.discountRate,
     member_balance: row.member_balance,
     total_recharge: row.total_recharge,
+    is_merchant: row.is_merchant,
+    store_name: row.store_name || row.player_id,
+    store_description: row.store_description || '',
+    store_notice: row.store_notice || '',
+    store_balance: row.store_balance,
+    last_store_checkin_at: row.last_store_checkin_at,
     is_banned: row.is_banned,
     banned_reason: row.banned_reason,
     created_at: row.created_at,
@@ -391,6 +410,15 @@ function pickEffectiveMemberTier(user) {
 function getRechargeBonusAmount(amount, bonusMin = 100, bonusAmount = 10) {
   if (amount >= bonusMin) return Math.floor(amount / bonusMin) * bonusAmount
   return 0
+}
+
+function hasCheckedInToday(value) {
+  if (!value) return false
+  const today = new Date()
+  const target = new Date(value)
+  return today.getFullYear() === target.getFullYear()
+    && today.getMonth() === target.getMonth()
+    && today.getDate() === target.getDate()
 }
 
 function normalizeInvite(row) {
@@ -436,6 +464,21 @@ function normalizeWalletLog(row) {
   }
 }
 
+function normalizePayoutRequest(row) {
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    username: row.username,
+    store_name: row.store_name,
+    amount: row.amount,
+    status: row.status,
+    note: row.note,
+    requested_at: row.requested_at,
+    reviewed_at: row.reviewed_at,
+    reviewed_by_admin: row.reviewed_by_admin,
+  }
+}
+
 async function createWalletLog(clientOrPool, { userId, changeType, amount, balanceAfter, note = '', createdByAdmin = null }) {
   await clientOrPool.query(
     `INSERT INTO wallet_logs (user_id, change_type, amount, balance_after, note, created_by_admin)
@@ -454,21 +497,6 @@ async function initDatabase() {
     )
   `)
   await query(`
-    CREATE TABLE IF NOT EXISTS products (
-      id SERIAL PRIMARY KEY,
-      name TEXT NOT NULL,
-      description TEXT NOT NULL,
-      price INTEGER NOT NULL,
-      category TEXT NOT NULL DEFAULT '热门补给',
-      image_url TEXT NOT NULL,
-      stock_quantity INTEGER NOT NULL DEFAULT 1,
-      is_active BOOLEAN NOT NULL DEFAULT TRUE,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `)
-  await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT '热门补给'`)
-  await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS stock_quantity INTEGER NOT NULL DEFAULT 1`)
-  await query(`
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
       username TEXT UNIQUE NOT NULL,
@@ -478,6 +506,12 @@ async function initDatabase() {
       member_tier TEXT NOT NULL DEFAULT 'none',
       member_balance INTEGER NOT NULL DEFAULT 0,
       total_recharge INTEGER NOT NULL DEFAULT 0,
+      is_merchant BOOLEAN NOT NULL DEFAULT FALSE,
+      store_name TEXT,
+      store_description TEXT NOT NULL DEFAULT '',
+      store_notice TEXT NOT NULL DEFAULT '',
+      store_balance INTEGER NOT NULL DEFAULT 0,
+      last_store_checkin_at TIMESTAMPTZ,
       password_hash TEXT NOT NULL,
       is_banned BOOLEAN NOT NULL DEFAULT FALSE,
       banned_reason TEXT NOT NULL DEFAULT '',
@@ -489,7 +523,32 @@ async function initDatabase() {
   await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS member_tier TEXT NOT NULL DEFAULT 'none'")
   await query('ALTER TABLE users ADD COLUMN IF NOT EXISTS member_balance INTEGER NOT NULL DEFAULT 0')
   await query('ALTER TABLE users ADD COLUMN IF NOT EXISTS total_recharge INTEGER NOT NULL DEFAULT 0')
+  await query('ALTER TABLE users ADD COLUMN IF NOT EXISTS is_merchant BOOLEAN NOT NULL DEFAULT FALSE')
+  await query('ALTER TABLE users ADD COLUMN IF NOT EXISTS store_name TEXT')
+  await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS store_description TEXT NOT NULL DEFAULT ''")
+  await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS store_notice TEXT NOT NULL DEFAULT ''")
+  await query('ALTER TABLE users ADD COLUMN IF NOT EXISTS store_balance INTEGER NOT NULL DEFAULT 0')
+  await query('ALTER TABLE users ADD COLUMN IF NOT EXISTS last_store_checkin_at TIMESTAMPTZ')
   await query('CREATE UNIQUE INDEX IF NOT EXISTS users_invite_code_key ON users(invite_code) WHERE invite_code IS NOT NULL')
+  await query(`
+    CREATE TABLE IF NOT EXISTS products (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL,
+      price INTEGER NOT NULL,
+      category TEXT NOT NULL DEFAULT '热门补给',
+      image_url TEXT NOT NULL,
+      stock_quantity INTEGER NOT NULL DEFAULT 1,
+      owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      store_name TEXT NOT NULL DEFAULT '系统商城',
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `)
+  await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT '热门补给'`)
+  await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS stock_quantity INTEGER NOT NULL DEFAULT 1`)
+  await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL`)
+  await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS store_name TEXT NOT NULL DEFAULT '系统商城'`)
   await query(`
     CREATE TABLE IF NOT EXISTS invite_codes (
       id SERIAL PRIMARY KEY,
@@ -509,6 +568,10 @@ async function initDatabase() {
       api_key TEXT UNIQUE NOT NULL,
       user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
       account_username TEXT,
+      merchant_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      merchant_store_name TEXT NOT NULL DEFAULT '系统商城',
+      merchant_income INTEGER NOT NULL DEFAULT 0,
+      store_credit_status TEXT NOT NULL DEFAULT 'none',
       player_id TEXT NOT NULL,
       items JSONB NOT NULL,
       total_price INTEGER NOT NULL,
@@ -530,6 +593,10 @@ async function initDatabase() {
   await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_amount INTEGER NOT NULL DEFAULT 0')
   await query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS member_tier TEXT NOT NULL DEFAULT 'none'")
   await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS member_discount_rate NUMERIC(4,2) NOT NULL DEFAULT 1')
+  await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS merchant_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL')
+  await query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS merchant_store_name TEXT NOT NULL DEFAULT '系统商城'")
+  await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS merchant_income INTEGER NOT NULL DEFAULT 0')
+  await query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS store_credit_status TEXT NOT NULL DEFAULT 'none'")
   await query(`
     CREATE TABLE IF NOT EXISTS activity_logs (
       id SERIAL PRIMARY KEY,
@@ -584,6 +651,20 @@ async function initDatabase() {
       created_by_admin TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `)
+  await query(`
+    CREATE TABLE IF NOT EXISTS payout_requests (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      username TEXT NOT NULL,
+      store_name TEXT NOT NULL,
+      amount INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      note TEXT NOT NULL DEFAULT '',
+      requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      reviewed_at TIMESTAMPTZ,
+      reviewed_by_admin TEXT
     )
   `)
 }
@@ -648,10 +729,80 @@ app.get('/api/health', (req, res) => res.json({ ok: true }))
 
 app.get('/api/products', async (req, res) => {
   try {
-    const rows = await getRows('SELECT * FROM products WHERE is_active = TRUE ORDER BY id DESC')
-    res.json(rows.map(normalizeProduct))
+    const storeId = String(req.query.store_id || '').trim()
+    const values = []
+    let whereClause = 'WHERE p.is_active = TRUE'
+    if (storeId) {
+      if (!Number.isInteger(Number(storeId))) return res.status(400).json({ message: '店铺参数无效' })
+      values.push(Number(storeId))
+      whereClause += ' AND p.owner_user_id = $1'
+    }
+    const rows = await getRows(
+      `SELECT p.*, u.last_store_checkin_at, u.is_merchant
+       FROM products p
+       LEFT JOIN users u ON u.id = p.owner_user_id
+       ${whereClause}
+       ORDER BY p.id DESC`,
+      values,
+    )
+    const visible = rows.filter((row) => row.owner_user_id === null || hasCheckedInToday(row.last_store_checkin_at))
+    res.json(visible.map(normalizeProduct))
   } catch {
     res.status(500).json({ message: '获取商品失败' })
+  }
+})
+
+app.get('/api/stores', async (req, res) => {
+  try {
+    const rows = await getRows(
+      `SELECT u.id, u.username, COALESCE(u.store_name, u.player_id) AS store_name, u.store_description, u.store_notice, u.store_balance, u.last_store_checkin_at,
+              COUNT(p.id)::int AS product_count
+        FROM users u
+        LEFT JOIN products p ON p.owner_user_id = u.id AND p.is_active = TRUE
+        WHERE u.is_merchant = TRUE
+        GROUP BY u.id, u.username, COALESCE(u.store_name, u.player_id), u.store_description, u.store_notice, u.store_balance, u.last_store_checkin_at
+        ORDER BY store_name ASC`,
+    )
+    res.json(rows.map((row) => ({
+      ...row,
+      has_checked_in_today: hasCheckedInToday(row.last_store_checkin_at),
+    })))
+  } catch {
+    res.status(500).json({ message: '获取商家列表失败' })
+  }
+})
+
+app.get('/api/stores/:id', async (req, res) => {
+  try {
+    const store = await getRow(
+      `SELECT u.id, u.username, COALESCE(u.store_name, u.player_id) AS store_name, u.store_description, u.store_notice, u.store_balance, u.last_store_checkin_at,
+              COUNT(p.id)::int AS product_count
+       FROM users u
+       LEFT JOIN products p ON p.owner_user_id = u.id AND p.is_active = TRUE
+       WHERE u.is_merchant = TRUE AND u.id = $1
+       GROUP BY u.id, u.username, COALESCE(u.store_name, u.player_id), u.store_description, u.store_notice, u.store_balance, u.last_store_checkin_at`,
+      [req.params.id],
+    )
+    if (!store) return res.status(404).json({ message: '店铺不存在' })
+
+    const rows = await getRows(
+      `SELECT p.*, u.last_store_checkin_at, u.is_merchant
+       FROM products p
+       LEFT JOIN users u ON u.id = p.owner_user_id
+       WHERE p.is_active = TRUE AND p.owner_user_id = $1
+       ORDER BY p.id DESC`,
+      [req.params.id],
+    )
+    const visible = rows.filter((row) => hasCheckedInToday(row.last_store_checkin_at))
+    res.json({
+      store: {
+        ...store,
+        has_checked_in_today: hasCheckedInToday(store.last_store_checkin_at),
+      },
+      products: visible.map(normalizeProduct),
+    })
+  } catch {
+    res.status(500).json({ message: '获取店铺详情失败' })
   }
 })
 
@@ -816,11 +967,204 @@ app.get('/api/announcements', async (req, res) => {
   }
 })
 
+app.get('/api/merchant/dashboard', merchantRequired, async (req, res) => {
+  try {
+    const products = await getRows('SELECT * FROM products WHERE owner_user_id = $1 ORDER BY created_at DESC, id DESC', [req.user.id])
+    const orders = await getRows('SELECT * FROM orders WHERE merchant_user_id = $1 ORDER BY created_at DESC, id DESC', [req.user.id])
+    const payoutRequests = await getRows('SELECT * FROM payout_requests WHERE user_id = $1 ORDER BY requested_at DESC, id DESC', [req.user.id])
+    const walletLogs = await getRows(
+      `SELECT * FROM wallet_logs
+       WHERE user_id = $1 AND change_type IN ('store_income', 'store_payout')
+       ORDER BY created_at DESC, id DESC
+       LIMIT 100`,
+      [req.user.id],
+    )
+    res.json({
+      user: normalizeUser(req.user),
+      products: products.map(normalizeProduct),
+      orders: orders.map(normalizeOrder),
+      payout_requests: payoutRequests.map(normalizePayoutRequest),
+      wallet_logs: walletLogs.map(normalizeWalletLog),
+      checked_in_today: hasCheckedInToday(req.user.last_store_checkin_at),
+    })
+  } catch {
+    res.status(500).json({ message: '获取商家中心信息失败' })
+  }
+})
+
+app.post('/api/merchant/check-in', merchantRequired, async (req, res) => {
+  try {
+    const storeName = String(req.user.store_name || req.user.player_id).trim()
+    const updated = await getRow('UPDATE users SET store_name = COALESCE(store_name, $1), last_store_checkin_at = NOW() WHERE id = $2 RETURNING *', [storeName, req.user.id])
+    await query('UPDATE products SET is_active = CASE WHEN stock_quantity > 0 THEN TRUE ELSE FALSE END, store_name = $1 WHERE owner_user_id = $2', [String(updated.store_name || updated.player_id).trim(), updated.id])
+    await logAction('merchant_checked_in', { userId: updated.id, username: updated.username })
+    res.json({ user: normalizeUser(updated), checked_in_today: true })
+  } catch {
+    res.status(500).json({ message: '签到失败' })
+  }
+})
+
+app.put('/api/merchant/store', merchantRequired, async (req, res) => {
+  try {
+    const nextName = String(req.body?.store_name || '').trim() || String(req.user.player_id).trim()
+    const nextDescription = String(req.body?.store_description || '').trim()
+    const nextNotice = String(req.body?.store_notice || '').trim()
+    const updated = await getRow(
+      'UPDATE users SET store_name = $1, store_description = $2, store_notice = $3 WHERE id = $4 RETURNING *',
+      [nextName, nextDescription, nextNotice, req.user.id],
+    )
+    await query('UPDATE products SET store_name = $1 WHERE owner_user_id = $2', [nextName, req.user.id])
+    await logAction('merchant_store_updated', { userId: updated.id, username: updated.username, storeName: nextName })
+    res.json(normalizeUser(updated))
+  } catch {
+    res.status(500).json({ message: '更新店铺名称失败' })
+  }
+})
+
+app.post('/api/merchant/products', merchantRequired, async (req, res) => {
+  try {
+    const { name, description, price, category = '热门补给', image_url, stock_quantity, is_active = true } = req.body || {}
+    const normalizedStock = parseNonNegativeInt(stock_quantity)
+    if (!name || !description || !image_url || !String(category).trim() || !Number.isInteger(Number(price)) || normalizedStock === null) {
+      return res.status(400).json({ message: '请填写完整且正确的商品信息' })
+    }
+    const storeName = String(req.user.store_name || req.user.player_id).trim() || String(req.user.player_id).trim()
+    const canShow = Boolean(is_active) && normalizedStock > 0 && hasCheckedInToday(req.user.last_store_checkin_at)
+    const created = await getRow(
+      `INSERT INTO products (name, description, price, category, image_url, stock_quantity, owner_user_id, store_name, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING *`,
+      [String(name).trim(), String(description).trim(), Number(price), String(category).trim(), String(image_url).trim(), normalizedStock, req.user.id, storeName, canShow],
+    )
+    await logAction('merchant_product_created', { id: created.id, userId: req.user.id, username: req.user.username })
+    res.status(201).json(normalizeProduct(created))
+  } catch {
+    res.status(500).json({ message: '添加商品失败' })
+  }
+})
+
+app.put('/api/merchant/products/:id', merchantRequired, async (req, res) => {
+  try {
+    const { id } = req.params
+    const product = await getRow('SELECT * FROM products WHERE id = $1 AND owner_user_id = $2', [id, req.user.id])
+    if (!product) return res.status(404).json({ message: '商品不存在' })
+    const { name, description, price, category, image_url, stock_quantity, is_active } = req.body || {}
+    const normalizedStock = stock_quantity === undefined ? product.stock_quantity : parseNonNegativeInt(stock_quantity)
+    if (normalizedStock === null) return res.status(400).json({ message: '库存必须是大于等于 0 的整数' })
+    const canShow = normalizedStock > 0 && hasCheckedInToday(req.user.last_store_checkin_at) && (typeof is_active === 'boolean' ? is_active : product.is_active)
+    const updated = await getRow(
+      `UPDATE products
+       SET name = $1, description = $2, price = $3, category = $4, image_url = $5, stock_quantity = $6, store_name = $7, is_active = $8
+       WHERE id = $9
+       RETURNING *`,
+      [
+        String(name ?? product.name).trim(),
+        String(description ?? product.description).trim(),
+        Number.isInteger(Number(price)) ? Number(price) : product.price,
+        String(category ?? product.category).trim(),
+        String(image_url ?? product.image_url).trim(),
+        normalizedStock,
+        String(req.user.store_name || req.user.player_id).trim(),
+        canShow,
+        id,
+      ],
+    )
+    await logAction('merchant_product_updated', { id, userId: req.user.id, username: req.user.username })
+    res.json(normalizeProduct(updated))
+  } catch {
+    res.status(500).json({ message: '编辑商品失败' })
+  }
+})
+
+app.delete('/api/merchant/products/:id', merchantRequired, async (req, res) => {
+  try {
+    const deleted = await getRow('DELETE FROM products WHERE id = $1 AND owner_user_id = $2 RETURNING id', [req.params.id, req.user.id])
+    if (!deleted) return res.status(404).json({ message: '商品不存在' })
+    await logAction('merchant_product_deleted', { id: req.params.id, userId: req.user.id, username: req.user.username })
+    res.json({ message: '商品已删除' })
+  } catch {
+    res.status(500).json({ message: '删除商品失败' })
+  }
+})
+
+app.put('/api/merchant/orders/:orderNo/ship', merchantRequired, async (req, res) => {
+  try {
+    const { orderNo } = req.params
+    const { shipping_instruction } = req.body || {}
+    if (!shipping_instruction || !String(shipping_instruction).trim()) return res.status(400).json({ message: '发放指令不能为空' })
+    const order = await getRow('SELECT * FROM orders WHERE order_number = $1 AND merchant_user_id = $2', [orderNo, req.user.id])
+    if (!order) return res.status(404).json({ message: '订单不存在' })
+    if (order.status !== 'pending') return res.status(400).json({ message: '仅待处理订单可发货' })
+
+    await withTransaction(async (client) => {
+      await client.query(
+        `UPDATE orders
+         SET status = 'shipped', shipping_instruction = $1, processed_at = NOW(),
+             store_credit_status = CASE WHEN merchant_user_id IS NOT NULL AND store_credit_status = 'pending' THEN 'credited' ELSE store_credit_status END
+         WHERE order_number = $2`,
+        [String(shipping_instruction).trim(), orderNo],
+      )
+      if (order.merchant_user_id && order.store_credit_status === 'pending') {
+        const { rows } = await client.query('SELECT * FROM users WHERE id = $1 FOR UPDATE', [order.merchant_user_id])
+        const merchant = rows[0]
+        const nextStoreBalance = Number(merchant.store_balance || 0) + Number(order.merchant_income || 0)
+        await client.query('UPDATE users SET store_balance = $1 WHERE id = $2', [nextStoreBalance, merchant.id])
+        await createWalletLog(client, {
+          userId: merchant.id,
+          changeType: 'store_income',
+          amount: Number(order.merchant_income || 0),
+          balanceAfter: nextStoreBalance,
+          note: `商家订单收入 ${order.order_number}`,
+        })
+      }
+    })
+    await logAction('merchant_order_shipped', { orderNo, userId: req.user.id, username: req.user.username })
+    res.json({ message: '订单已发货，店铺收入已更新' })
+  } catch {
+    res.status(500).json({ message: '发货失败' })
+  }
+})
+
+app.post('/api/merchant/payout-requests', merchantRequired, async (req, res) => {
+  try {
+    const amount = Number(req.body?.amount || 0)
+    const note = String(req.body?.note || '').trim()
+    if (!Number.isInteger(amount) || amount <= 0) return res.status(400).json({ message: '提现申请金额必须是正整数' })
+    const user = await getRow('SELECT * FROM users WHERE id = $1', [req.user.id])
+    if (Number(user.store_balance || 0) < amount) return res.status(400).json({ message: '店铺收入余额不足' })
+    const created = await getRow(
+      `INSERT INTO payout_requests (user_id, username, store_name, amount, note)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [req.user.id, req.user.username, String(req.user.store_name || req.user.player_id).trim(), amount, note],
+    )
+    await logAction('merchant_payout_requested', { userId: req.user.id, username: req.user.username, amount })
+    res.status(201).json(normalizePayoutRequest(created))
+  } catch {
+    res.status(500).json({ message: '提交提现申请失败' })
+  }
+})
+
 app.post('/api/admin/uploads', authRequired, upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: '未上传文件' })
     const uploaded = await persistUpload(req.file)
     await logAction('product_image_uploaded', { admin: req.admin.username, storage: uploaded.storage, key: uploaded.key })
+    res.status(201).json({
+      url: uploaded.url,
+      filename: uploaded.key,
+      storage: uploaded.storage,
+    })
+  } catch {
+    res.status(500).json({ message: '上传失败' })
+  }
+})
+
+app.post('/api/merchant/uploads', userAuthRequired, merchantRequired, upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: '未上传文件' })
+    const uploaded = await persistUpload(req.file)
+    await logAction('merchant_product_image_uploaded', { userId: req.user.id, username: req.user.username, storage: uploaded.storage, key: uploaded.key })
     res.status(201).json({
       url: uploaded.url,
       filename: uploaded.key,
@@ -854,6 +1198,10 @@ app.post('/api/orders', userAuthRequired, async (req, res) => {
     const tierMeta = pickEffectiveMemberTier(activeUser)
     let paidAmount = 0
     let discountAmount = 0
+    let merchantUserId = null
+    let merchantStoreName = '系统商城'
+    let merchantIncome = 0
+    let storeCreditStatus = 'none'
 
     const orderResult = await withTransaction(async (client) => {
       const { rows: userRows } = await client.query('SELECT * FROM users WHERE id = $1 FOR UPDATE', [activeUser.id])
@@ -886,12 +1234,26 @@ app.post('/api/orders', userAuthRequired, async (req, res) => {
           error.statusCode = 400
           throw error
         }
+        if (merchantUserId === null && product.owner_user_id) {
+          merchantUserId = product.owner_user_id
+          merchantStoreName = product.store_name || '系统商城'
+        }
+        if (merchantUserId !== null && Number(product.owner_user_id || 0) !== Number(merchantUserId)) {
+          const error = new Error('暂不支持跨店铺合并下单，请分别提交系统商城或不同商家的商品')
+          error.statusCode = 400
+          throw error
+        }
+        if (merchantUserId === null && product.owner_user_id === null) {
+          merchantStoreName = '系统商城'
+        }
         normalizedItems.push({ product_id: product.id, name: product.name, price: product.price, quantity })
         totalPrice += product.price * quantity
       }
 
       paidAmount = Math.max(0, Math.round(totalPrice * tierMeta.discountRate))
       discountAmount = Math.max(0, totalPrice - paidAmount)
+      merchantIncome = merchantUserId ? paidAmount : 0
+      storeCreditStatus = merchantUserId ? 'pending' : 'none'
 
       if (Number(lockedUser.member_balance || 0) < paidAmount) {
         const error = new Error(`会员卡余额不足，当前余额 ${lockedUser.member_balance || 0} 金币，应付 ${paidAmount} 金币`)
@@ -928,13 +1290,17 @@ app.post('/api/orders', userAuthRequired, async (req, res) => {
 
       await client.query(
         `INSERT INTO orders
-        (order_number, api_key, user_id, account_username, player_id, items, total_price, paid_amount, discount_amount, member_tier, member_discount_rate, status, note, email)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, 'pending', $12, $13)`,
+        (order_number, api_key, user_id, account_username, merchant_user_id, merchant_store_name, merchant_income, store_credit_status, player_id, items, total_price, paid_amount, discount_amount, member_tier, member_discount_rate, status, note, email)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, 'pending', $16, $17)`,
         [
           orderNumber,
           apiKey,
           activeUser?.id || null,
           activeUser?.username || null,
+          merchantUserId,
+          merchantStoreName,
+          merchantIncome,
+          storeCreditStatus,
           normalizedPlayerId,
           JSON.stringify(normalizedItems),
           totalPrice,
@@ -947,7 +1313,7 @@ app.post('/api/orders', userAuthRequired, async (req, res) => {
         ],
       )
 
-      return { normalizedItems, totalPrice, paidAmount, discountAmount, orderNumber, apiKey, memberBalance: nextBalance }
+      return { normalizedItems, totalPrice, paidAmount, discountAmount, orderNumber, apiKey, memberBalance: nextBalance, merchantStoreName, merchantUserId }
     })
 
     await logAction('order_created', {
@@ -963,6 +1329,8 @@ app.post('/api/orders', userAuthRequired, async (req, res) => {
       api_key: orderResult.apiKey,
       user_id: activeUser?.id || null,
       account_username: activeUser?.username || null,
+      merchant_user_id: orderResult.merchantUserId,
+      merchant_store_name: orderResult.merchantStoreName,
       player_id: normalizedPlayerId,
       items: orderResult.normalizedItems,
       total_price: orderResult.totalPrice,
@@ -1079,10 +1447,31 @@ app.put('/api/admin/orders/:orderNo/ship', authRequired, async (req, res) => {
     const order = await getRow('SELECT * FROM orders WHERE order_number = $1', [orderNo])
     if (!order) return res.status(404).json({ message: '订单不存在' })
     if (order.status !== 'pending') return res.status(400).json({ message: '仅待处理订单可发货' })
-    await query(
-      'UPDATE orders SET status = $1, shipping_instruction = $2, processed_at = NOW() WHERE order_number = $3',
-      ['shipped', String(shipping_instruction).trim(), orderNo],
-    )
+    await withTransaction(async (client) => {
+      await client.query(
+        `UPDATE orders
+         SET status = $1, shipping_instruction = $2, processed_at = NOW(),
+             store_credit_status = CASE WHEN merchant_user_id IS NOT NULL AND store_credit_status = 'pending' THEN 'credited' ELSE store_credit_status END
+         WHERE order_number = $3`,
+        ['shipped', String(shipping_instruction).trim(), orderNo],
+      )
+      if (order.merchant_user_id && order.store_credit_status === 'pending') {
+        const { rows } = await client.query('SELECT * FROM users WHERE id = $1 FOR UPDATE', [order.merchant_user_id])
+        const merchant = rows[0]
+        if (merchant) {
+          const nextStoreBalance = Number(merchant.store_balance || 0) + Number(order.merchant_income || 0)
+          await client.query('UPDATE users SET store_balance = $1 WHERE id = $2', [nextStoreBalance, merchant.id])
+          await createWalletLog(client, {
+            userId: merchant.id,
+            changeType: 'store_income',
+            amount: Number(order.merchant_income || 0),
+            balanceAfter: nextStoreBalance,
+            note: `商家订单收入 ${order.order_number}`,
+            createdByAdmin: req.admin.username,
+          })
+        }
+      }
+    })
     await logAction('order_shipped', { orderNo, admin: req.admin.username })
     res.json({ message: '订单已标记为已发货' })
   } catch {
@@ -1121,8 +1510,8 @@ app.post('/api/admin/products', authRequired, async (req, res) => {
       return res.status(400).json({ message: '请填写完整且正确的商品信息' })
     }
     const created = await getRow(
-      `INSERT INTO products (name, description, price, category, image_url, stock_quantity, is_active)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO products (name, description, price, category, image_url, stock_quantity, owner_user_id, store_name, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, NULL, '系统商城', $7)
        RETURNING *`,
       [
         String(name).trim(),
@@ -1151,7 +1540,9 @@ app.put('/api/admin/products/:id', authRequired, async (req, res) => {
     if (normalizedStock === null) return res.status(400).json({ message: '库存必须是大于等于 0 的整数' })
     const updated = await getRow(
       `UPDATE products
-       SET name = $1, description = $2, price = $3, category = $4, image_url = $5, stock_quantity = $6, is_active = $7
+       SET name = $1, description = $2, price = $3, category = $4, image_url = $5, stock_quantity = $6,
+           store_name = CASE WHEN owner_user_id IS NULL THEN '系统商城' ELSE store_name END,
+           is_active = $7
        WHERE id = $8
        RETURNING *`,
       [
@@ -1314,6 +1705,31 @@ app.put('/api/admin/users/:id/member', authRequired, async (req, res) => {
   }
 })
 
+app.put('/api/admin/users/:id/merchant', authRequired, async (req, res) => {
+  try {
+    const { id } = req.params
+    const { is_merchant, store_name = '' } = req.body || {}
+    if (typeof is_merchant !== 'boolean') return res.status(400).json({ message: '请提供正确的商家认证状态' })
+    const user = await getRow('SELECT * FROM users WHERE id = $1', [id])
+    if (!user) return res.status(404).json({ message: '用户不存在' })
+    const nextStoreName = String(store_name || '').trim() || user.player_id
+    const updated = await getRow(
+      `UPDATE users
+       SET is_merchant = $1, store_name = $2
+       WHERE id = $3
+       RETURNING *`,
+      [is_merchant, nextStoreName, id],
+    )
+    if (is_merchant) {
+      await query('UPDATE products SET store_name = $1 WHERE owner_user_id = $2', [nextStoreName, id])
+    }
+    await logAction(is_merchant ? 'merchant_enabled' : 'merchant_disabled', { id, admin: req.admin.username, storeName: nextStoreName })
+    res.json(normalizeUser(updated))
+  } catch {
+    res.status(500).json({ message: '更新商家状态失败' })
+  }
+})
+
 app.get('/api/admin/announcements', authRequired, async (req, res) => {
   try {
     const rows = await getRows('SELECT * FROM announcements ORDER BY is_pinned DESC, updated_at DESC, id DESC')
@@ -1373,6 +1789,88 @@ app.delete('/api/admin/announcements/:id', authRequired, async (req, res) => {
     res.json({ message: '公告已删除' })
   } catch {
     res.status(500).json({ message: '删除公告失败' })
+  }
+})
+
+app.get('/api/admin/payout-requests', authRequired, async (req, res) => {
+  try {
+    const rows = await getRows('SELECT * FROM payout_requests ORDER BY requested_at DESC, id DESC')
+    res.json(rows.map(normalizePayoutRequest))
+  } catch {
+    res.status(500).json({ message: '获取提现申请失败' })
+  }
+})
+
+app.get('/api/admin/merchant-overview', authRequired, async (req, res) => {
+  try {
+    const merchants = await getRows('SELECT * FROM users WHERE is_merchant = TRUE ORDER BY id DESC')
+    const orders = await getRows('SELECT * FROM orders WHERE merchant_user_id IS NOT NULL ORDER BY created_at DESC, id DESC')
+    const payoutRequests = await getRows('SELECT * FROM payout_requests ORDER BY requested_at DESC, id DESC')
+    const walletLogs = await getRows(
+      `SELECT * FROM wallet_logs
+       WHERE change_type IN ('store_income', 'store_payout')
+       ORDER BY created_at DESC, id DESC`,
+    )
+    res.json({
+      merchants: merchants.map(normalizeUser),
+      orders: orders.map(normalizeOrder),
+      payout_requests: payoutRequests.map(normalizePayoutRequest),
+      wallet_logs: walletLogs.map(normalizeWalletLog),
+    })
+  } catch {
+    res.status(500).json({ message: '获取商家总览失败' })
+  }
+})
+
+app.put('/api/admin/payout-requests/:id/status', authRequired, async (req, res) => {
+  try {
+    const { id } = req.params
+    const status = String(req.body?.status || '').trim()
+    if (!['approved', 'rejected'].includes(status)) return res.status(400).json({ message: '申请状态无效' })
+
+    const request = await getRow('SELECT * FROM payout_requests WHERE id = $1', [id])
+    if (!request) return res.status(404).json({ message: '提现申请不存在' })
+    if (request.status !== 'pending') return res.status(400).json({ message: '该申请已处理' })
+
+    await withTransaction(async (client) => {
+      if (status === 'approved') {
+        const { rows } = await client.query('SELECT * FROM users WHERE id = $1 FOR UPDATE', [request.user_id])
+        const merchant = rows[0]
+        if (!merchant) {
+          const error = new Error('商家不存在')
+          error.statusCode = 404
+          throw error
+        }
+        if (Number(merchant.store_balance || 0) < Number(request.amount || 0)) {
+          const error = new Error('店铺收入余额不足，无法批准该申请')
+          error.statusCode = 400
+          throw error
+        }
+        const nextStoreBalance = Number(merchant.store_balance || 0) - Number(request.amount || 0)
+        await client.query('UPDATE users SET store_balance = $1 WHERE id = $2', [nextStoreBalance, merchant.id])
+        await createWalletLog(client, {
+          userId: merchant.id,
+          changeType: 'store_payout',
+          amount: -Number(request.amount || 0),
+          balanceAfter: nextStoreBalance,
+          note: `商家提现申请 #${request.id}`,
+          createdByAdmin: req.admin.username,
+        })
+      }
+
+      await client.query(
+        `UPDATE payout_requests
+         SET status = $1, reviewed_at = NOW(), reviewed_by_admin = $2
+         WHERE id = $3`,
+        [status, req.admin.username, id],
+      )
+    })
+
+    await logAction('payout_request_reviewed', { id, status, admin: req.admin.username })
+    res.json({ message: status === 'approved' ? '提现申请已批准' : '提现申请已拒绝' })
+  } catch (error) {
+    if (error?.statusCode) return res.status(error.statusCode).json({ message: error.message })
+    res.status(500).json({ message: '处理提现申请失败' })
   }
 })
 
