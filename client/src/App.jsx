@@ -1951,6 +1951,13 @@ function AdminShell() {
     return []
   }
 
+  const normalizeMerchantOverview = (payload) => ({
+    merchants: extractList(payload, 'merchants'),
+    orders: extractList(payload, 'orders'),
+    payout_requests: extractList(payload, 'payout_requests'),
+    wallet_logs: extractList(payload, 'wallet_logs'),
+  })
+
   useEffect(() => {
     const token = localStorage.getItem('ms_token')
     const rawAdmin = localStorage.getItem('ms_admin')
@@ -2006,7 +2013,7 @@ function AdminShell() {
 
   const loadMerchantOverview = async () => {
     const { data } = await api.get('/admin/merchant-overview')
-    setMerchantOverview(data)
+    setMerchantOverview(normalizeMerchantOverview(data))
   }
 
   const loadSiteContent = async () => {
