@@ -1944,6 +1944,13 @@ function AdminShell() {
   const isRootAdmin = admin?.username === 'admin'
   const allowedSections = adminRoleSectionMap[adminRole] || []
 
+  const extractList = (payload, fallbackKey) => {
+    if (Array.isArray(payload)) return payload
+    if (Array.isArray(payload?.items)) return payload.items
+    if (fallbackKey && Array.isArray(payload?.[fallbackKey])) return payload[fallbackKey]
+    return []
+  }
+
   useEffect(() => {
     const token = localStorage.getItem('ms_token')
     const rawAdmin = localStorage.getItem('ms_admin')
@@ -1958,43 +1965,43 @@ function AdminShell() {
 
   const loadOrders = async () => {
     const { data } = await api.get('/admin/orders', { params: { status: statusFilter } })
-    setOrders(data)
+    setOrders(extractList(data))
   }
 
   const loadProducts = async () => {
     const { data } = await api.get('/admin/products')
-    setProducts(data.all || [])
+    setProducts(extractList(data, 'all'))
   }
 
   const loadAdmins = async () => {
     const { data } = await api.get('/admin/admins')
-    setAdmins(data)
+    setAdmins(extractList(data))
   }
 
   const loadUsers = async (search = userSearch) => {
     const keyword = search.trim()
     const { data } = await api.get('/admin/users', { params: keyword ? { search: keyword } : {} })
-    setUsers(data)
+    setUsers(extractList(data))
   }
 
   const loadInvites = async () => {
     const { data } = await api.get('/admin/invites')
-    setInvites(data)
+    setInvites(extractList(data))
   }
 
   const loadFeedbacks = async () => {
     const { data } = await api.get('/admin/feedbacks', { params: { status: feedbackStatusFilter } })
-    setFeedbacks(data)
+    setFeedbacks(extractList(data))
   }
 
   const loadAnnouncements = async () => {
     const { data } = await api.get('/admin/announcements')
-    setAnnouncements(data)
+    setAnnouncements(extractList(data))
   }
 
   const loadPayoutRequests = async () => {
     const { data } = await api.get('/admin/payout-requests')
-    setPayoutRequests(data)
+    setPayoutRequests(extractList(data))
   }
 
   const loadMerchantOverview = async () => {
