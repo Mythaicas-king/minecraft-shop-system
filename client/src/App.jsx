@@ -194,6 +194,36 @@ function createDefaultSiteContent() {
   }
 }
 
+function normalizeSiteContent(payload) {
+  const defaults = createDefaultSiteContent()
+  return {
+    ...defaults,
+    ...(payload && typeof payload === 'object' ? payload : {}),
+    announcements: Array.isArray(payload?.announcements) ? payload.announcements : defaults.announcements,
+    features: Array.isArray(payload?.features) ? payload.features : defaults.features,
+    category_sections: Array.isArray(payload?.category_sections) ? payload.category_sections : defaults.category_sections,
+  }
+}
+
+function normalizeMemberDashboard(payload) {
+  return {
+    user: payload?.user || null,
+    orders: Array.isArray(payload?.orders) ? payload.orders : [],
+    wallet_logs: Array.isArray(payload?.wallet_logs) ? payload.wallet_logs : [],
+  }
+}
+
+function normalizeMerchantDashboard(payload) {
+  return {
+    user: payload?.user || null,
+    products: Array.isArray(payload?.products) ? payload.products : [],
+    orders: Array.isArray(payload?.orders) ? payload.orders : [],
+    payout_requests: Array.isArray(payload?.payout_requests) ? payload.payout_requests : [],
+    wallet_logs: Array.isArray(payload?.wallet_logs) ? payload.wallet_logs : [],
+    checked_in_today: Boolean(payload?.checked_in_today),
+  }
+}
+
 function readCachedJson(key, fallback) {
   if (typeof window === 'undefined') return fallback
   try {
@@ -275,7 +305,7 @@ function Storefront({ page = 'home' }) {
   const [stores, setStores] = useState(() => readCachedJson('ms_storefront_stores', []))
   const [selectedStoreId, setSelectedStoreId] = useState('')
   const [sortMode, setSortMode] = useState('latest')
-  const [siteContent, setSiteContent] = useState(() => ({ ...createDefaultSiteContent(), ...readCachedJson('ms_storefront_site_content', {}) }))
+  const [siteContent, setSiteContent] = useState(() => normalizeSiteContent(readCachedJson('ms_storefront_site_content', {})))
   const [searchTerm, setSearchTerm] = useState('')
   const [selectedProduct, setSelectedProduct] = useState(null)
   const [cart, setCart] = useState(() => {
@@ -344,7 +374,7 @@ function Storefront({ page = 'home' }) {
       }).catch(() => {})
     }
     api.get('/site-content').then(({ data }) => {
-      const nextContent = { ...createDefaultSiteContent(), ...data }
+      const nextContent = normalizeSiteContent(data)
       setSiteContent(nextContent)
       writeCachedJson('ms_storefront_site_content', nextContent)
     }).catch(() => {})
@@ -421,7 +451,7 @@ function Storefront({ page = 'home' }) {
   }, [products, siteContent.featured_product_id])
 
   const secondaryProducts = filteredProducts.filter((product) => product.id !== featuredProduct?.id).slice(0, 2)
-  const categorySections = siteContent.category_sections?.length ? siteContent.category_sections : createDefaultSiteContent().category_sections
+  const categorySections = Array.isArray(siteContent.category_sections) && siteContent.category_sections.length ? siteContent.category_sections : createDefaultSiteContent().category_sections
   const groupedProducts = categorySections.map((section) => ({
     ...section,
     products: filteredProducts.filter((product) => product.category === section.key),
@@ -1327,7 +1357,7 @@ function FeedbackPage() {
 }
 
 function MemberCenterPage() {
-  const [data, setData] = useState(() => readCachedJson('ms_member_dashboard_cache', { user: null, orders: [], wallet_logs: [] }))
+  const [data, setData] = useState(() => normalizeMemberDashboard(readCachedJson('ms_member_dashboard_cache', { user: null, orders: [], wallet_logs: [] })))
   const [loading, setLoading] = useState(true)
   const userToken = localStorage.getItem('ms_user_token') || ''
 
@@ -1338,8 +1368,9 @@ function MemberCenterPage() {
     }
     api.get('/me/dashboard', authHeader(userToken))
       .then(({ data: response }) => {
-        setData(response)
-        writeCachedJson('ms_member_dashboard_cache', response)
+        const next = normalizeMemberDashboard(response)
+        setData(next)
+        writeCachedJson('ms_member_dashboard_cache', next)
       })
       .catch((error) => toast.error(error?.response?.data?.message || '加载会员中心失败'))
       .finally(() => setLoading(false))
@@ -1484,7 +1515,7 @@ function StoreDirectoryPage() {
 }
 
 function MerchantCenterPage() {
-  const [dashboard, setDashboard] = useState(() => readCachedJson('ms_merchant_dashboard_cache', { user: null, products: [], orders: [], payout_requests: [], wallet_logs: [], checked_in_today: false }))
+  const [dashboard, setDashboard] = useState(() => normalizeMerchantDashboard(readCachedJson('ms_merchant_dashboard_cache', { user: null, products: [], orders: [], payout_requests: [], wallet_logs: [], checked_in_today: false })))
   const [loading, setLoading] = useState(true)
   const [storeForm, setStoreForm] = useState({ store_name: '', store_description: '', store_notice: '' })
   const [payoutForm, setPayoutForm] = useState({ amount: '0', note: '' })
@@ -1503,15 +1534,16 @@ function MerchantCenterPage() {
 
   const loadDashboard = async () => {
     const { data } = await api.get('/merchant/dashboard', authHeader(userToken))
-    setDashboard(data)
-    writeCachedJson('ms_merchant_dashboard_cache', data)
+    const next = normalizeMerchantDashboard(data)
+    setDashboard(next)
+    writeCachedJson('ms_merchant_dashboard_cache', next)
     setStoreForm({
-      store_name: data.user?.store_name || '',
-      store_description: data.user?.store_description || '',
-      store_notice: data.user?.store_notice || '',
+      store_name: next.user?.store_name || '',
+      store_description: next.user?.store_description || '',
+      store_notice: next.user?.store_notice || '',
     })
-    syncStoredUser(data.user)
-    return data
+    syncStoredUser(next.user)
+    return next
   }
 
   useEffect(() => {
@@ -1806,7 +1838,7 @@ function MerchantCenterPage() {
 }
 
 function RechargePage() {
-  const [siteContent, setSiteContent] = useState(() => ({ ...createDefaultSiteContent(), ...readCachedJson('ms_storefront_site_content', {}) }))
+  const [siteContent, setSiteContent] = useState(() => normalizeSiteContent(readCachedJson('ms_storefront_site_content', {})))
   const [amount, setAmount] = useState('100')
   const user = (() => {
     try {
@@ -1818,7 +1850,7 @@ function RechargePage() {
 
   useEffect(() => {
     api.get('/site-content').then(({ data }) => {
-      const nextContent = { ...createDefaultSiteContent(), ...data }
+      const nextContent = normalizeSiteContent(data)
       setSiteContent(nextContent)
       writeCachedJson('ms_storefront_site_content', nextContent)
     }).catch(() => {})
@@ -1953,7 +1985,7 @@ function AdminShell() {
   const [announcements, setAnnouncements] = useState(() => readCachedJson('ms_admin_announcements_cache', []))
   const [payoutRequests, setPayoutRequests] = useState(() => readCachedJson('ms_admin_payout_requests_cache', []))
   const [merchantOverview, setMerchantOverview] = useState(() => readCachedJson('ms_admin_merchant_overview_cache', { merchants: [], orders: [], payout_requests: [], wallet_logs: [] }))
-  const [siteContentForm, setSiteContentForm] = useState(() => ({ ...createDefaultSiteContent(), ...readCachedJson('ms_admin_site_content_cache', {}) }))
+  const [siteContentForm, setSiteContentForm] = useState(() => normalizeSiteContent(readCachedJson('ms_admin_site_content_cache', {})))
   const [statusFilter, setStatusFilter] = useState('all')
   const [feedbackStatusFilter, setFeedbackStatusFilter] = useState('all')
   const [inviteUsageFilter, setInviteUsageFilter] = useState('all')
@@ -2075,7 +2107,7 @@ function AdminShell() {
 
   const loadSiteContent = async () => {
     const { data } = await api.get('/admin/site-content')
-    const next = { ...createDefaultSiteContent(), ...data }
+    const next = normalizeSiteContent(data)
     setSiteContentForm(next)
     writeCachedJson('ms_admin_site_content_cache', next)
   }
