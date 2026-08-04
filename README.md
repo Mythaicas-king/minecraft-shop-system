@@ -7,7 +7,7 @@
 - 前端：React + Vite + Axios + React Router + React Hot Toast
 - 后端：Node.js + Express + PostgreSQL + JWT + bcryptjs
 - 图片上传：兼容 S3 / Cloudflare R2 的对象存储
-- 部署：GitHub Pages（前端） + Render Web Service（后端） + Render PostgreSQL（数据库）
+- 部署：GitHub Pages（前端） + 腾讯云 Ubuntu/PM2/Nginx（后端） + PostgreSQL（数据库）
 
 ## 功能概览
 
@@ -88,8 +88,8 @@ copy client\.env.production.example client\.env.production
 2. 修改 `client/.env.production`
 
 ```env
-VITE_API_BASE_URL=https://your-render-service.onrender.com/api
-VITE_BASE_PATH=/your-repo-name/
+VITE_API_BASE_URL=https://shopapi.alwaysmind.xyz/api
+VITE_BASE_PATH=/
 ```
 
 3. 发布前端
@@ -103,28 +103,28 @@ npm run deploy
 
 说明：前端已改为 `HashRouter`，GitHub Pages 上访问后台会是 `#/admin/login` 这种地址，避免刷新 404。
 
-## Render 后端部署
+## 腾讯云后端部署
 
-### 1. 创建 Render PostgreSQL
+### 1. 安装运行环境
 
-- Render 后台选择 `New -> PostgreSQL`
-- 创建完成后复制 `Internal Database URL`
+- 安装 Node.js、Nginx、PM2、PostgreSQL 客户端
+- 项目部署目录示例：`/home/ubuntu/minecraft-shop-system`
 
-### 2. 创建 Render Web Service
+### 2. 启动后端 API
 
-- 连接 GitHub 仓库
-- Root Directory：`minecraft-shop-system`
-- Build Command：`npm install`
-- Start Command：`npm start`
+```bash
+npm install
+pm2 start ecosystem.config.js
+```
 
 ### 3. 配置环境变量
 
 ```env
 NODE_ENV=production
-PORT=10000
+PORT=3001
 JWT_SECRET=replace-with-a-long-random-string
 DATABASE_URL=postgresql://...
-CORS_ORIGIN=https://your-github-name.github.io
+CORS_ORIGIN=https://Mythaicas-king.github.io,https://alwaysmind.xyz
 ORDER_SUBMIT_COOLDOWN_MS=30000
 CAPTCHA_TTL_SECONDS=300
 ```
@@ -138,7 +138,7 @@ CAPTCHA_TTL_SECONDS=300
 
 ### 4. 可选：配置对象存储图片上传
 
-如果你想让后台上传的商品图片在 Render 重部署后也不丢失，建议配置 S3 兼容对象存储，例如 Cloudflare R2、AWS S3、MinIO 或其他兼容服务。
+如果你想让后台上传的商品图片在服务器重部署后也不丢失，建议配置 S3 兼容对象存储，例如 Cloudflare R2、AWS S3、MinIO 或其他兼容服务。
 
 需要的环境变量：
 
@@ -156,7 +156,7 @@ S3_FORCE_PATH_STYLE=false
 
 - `S3_PUBLIC_BASE_URL` 推荐填写对象存储对外访问域名，这样商品图片会直接保存为长期可访问的公网 URL
 - Cloudflare R2 通常使用 `S3_REGION=auto`
-- 如果不配置这些变量，系统会退回到本地 `data/uploads`，适合本地开发，但不适合 Render 长期存储
+- 如果不配置这些变量，系统会退回到本地 `data/uploads`，适合本地开发，但不适合长期生产存储
 
 ## 默认账户
 
@@ -167,6 +167,8 @@ S3_FORCE_PATH_STYLE=false
 
 ## 部署备注
 
-- 前端发布到 GitHub Pages 时，仍然只推送 `client/dist` 到 `gh-pages`，不要把整个 `client` 目录直接推上去
-- 如果你使用自定义域名，例如 `https://alwaysmind.xyz`，后端 `CORS_ORIGIN` 需要同时包含 GitHub Pages 域名和自定义域名
+- 前端发布到 GitHub Pages 时，只推送 `client/dist` 到 `gh-pages`，不要把整个仓库或 `node_modules` 推上去
+- `client/public/CNAME` 已固定为 `alwaysmind.xyz`，GitHub Pages 发布后会自动保留自定义域名
+- 前端默认会把 `alwaysmind.xyz`、`www.alwaysmind.xyz` 和 `Mythaicas-king.github.io` 的 API 请求指向 `https://shopapi.alwaysmind.xyz/api`
+- 如果你使用自定义域名，后端 `CORS_ORIGIN` 需要同时包含 GitHub Pages 域名和自定义域名
 - 新增用户账号和验证码功能后，不需要额外第三方密钥；只要后端 `JWT_SECRET` 安全可靠即可
