@@ -1,4 +1,0 @@
-[2026-08-03T08:01:05.976Z] default_admin_created {"username":"admin"}
-[2026-08-03T08:01:05.993Z] seed_products_created {"count":3}
-[2026-08-03T08:01:48.208Z] admin_login_success {"username":"admin"}
-[2026-08-03T08:01:48.254Z] order_created {"orderNumber":"MC-VEJL4Q6S","playerId":"Steve","totalPrice":376}
