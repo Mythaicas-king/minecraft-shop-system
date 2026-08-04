@@ -14,7 +14,9 @@ function resolveApiBaseUrl() {
 
 function shouldRetry(error) {
   const method = String(error?.config?.method || 'get').toLowerCase()
-  if (!['get', 'head', 'options'].includes(method)) return false
+  const url = String(error?.config?.url || '')
+  const isRetriableLoginRequest = method === 'post' && ['/auth/login', '/admin/login'].includes(url)
+  if (!['get', 'head', 'options'].includes(method) && !isRetriableLoginRequest) return false
   if (error?.code === 'ERR_CANCELED') return false
   return !error?.response || error?.code === 'ERR_NETWORK' || error?.code === 'ECONNABORTED'
 }
