@@ -194,6 +194,24 @@ function createDefaultSiteContent() {
   }
 }
 
+function readCachedJson(key, fallback) {
+  if (typeof window === 'undefined') return fallback
+  try {
+    const raw = localStorage.getItem(key)
+    return raw ? JSON.parse(raw) : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function writeCachedJson(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    // ignore cache write failures
+  }
+}
+
 function App() {
   return (
     <HashRouter>
@@ -252,12 +270,12 @@ function Storefront({ page = 'home' }) {
   const location = useLocation()
   const navigate = useNavigate()
   const isStorePage = page === 'store'
-  const [products, setProducts] = useState([])
+  const [products, setProducts] = useState(() => readCachedJson('ms_storefront_products_all', []))
   const [storeMeta, setStoreMeta] = useState(null)
-  const [stores, setStores] = useState([])
+  const [stores, setStores] = useState(() => readCachedJson('ms_storefront_stores', []))
   const [selectedStoreId, setSelectedStoreId] = useState('')
   const [sortMode, setSortMode] = useState('latest')
-  const [siteContent, setSiteContent] = useState(createDefaultSiteContent)
+  const [siteContent, setSiteContent] = useState(() => ({ ...createDefaultSiteContent(), ...readCachedJson('ms_storefront_site_content', {}) }))
   const [searchTerm, setSearchTerm] = useState('')
   const [selectedProduct, setSelectedProduct] = useState(null)
   const [cart, setCart] = useState(() => {
@@ -308,21 +326,28 @@ function Storefront({ page = 'home' }) {
       ? api.get(`/stores/${storeId}`).then(({ data }) => {
         setStoreMeta(data.store)
         setProducts(data.products || [])
+        writeCachedJson('ms_storefront_products_all', data.products || [])
       })
       : api.get('/products', { params: selectedStoreId ? { store_id: selectedStoreId } : {} }).then(({ data }) => {
         setStoreMeta(null)
         setProducts(data)
+        writeCachedJson('ms_storefront_products_all', data)
       })
 
     loadProducts.catch((error) => {
-      setProducts([])
-      setStoreMeta(null)
       toast.error(error?.response?.data?.message || '获取商品失败')
     })
     if (!isStorePage) {
-      api.get('/stores').then(({ data }) => setStores(data)).catch(() => setStores([]))
+      api.get('/stores').then(({ data }) => {
+        setStores(data)
+        writeCachedJson('ms_storefront_stores', data)
+      }).catch(() => {})
     }
-    api.get('/site-content').then(({ data }) => setSiteContent({ ...createDefaultSiteContent(), ...data })).catch(() => {})
+    api.get('/site-content').then(({ data }) => {
+      const nextContent = { ...createDefaultSiteContent(), ...data }
+      setSiteContent(nextContent)
+      writeCachedJson('ms_storefront_site_content', nextContent)
+    }).catch(() => {})
   }, [isStorePage, storeId, selectedStoreId])
 
   useEffect(() => {
@@ -1302,7 +1327,7 @@ function FeedbackPage() {
 }
 
 function MemberCenterPage() {
-  const [data, setData] = useState({ user: null, orders: [], wallet_logs: [] })
+  const [data, setData] = useState(() => readCachedJson('ms_member_dashboard_cache', { user: null, orders: [], wallet_logs: [] }))
   const [loading, setLoading] = useState(true)
   const userToken = localStorage.getItem('ms_user_token') || ''
 
@@ -1312,7 +1337,10 @@ function MemberCenterPage() {
       return
     }
     api.get('/me/dashboard', authHeader(userToken))
-      .then(({ data: response }) => setData(response))
+      .then(({ data: response }) => {
+        setData(response)
+        writeCachedJson('ms_member_dashboard_cache', response)
+      })
       .catch((error) => toast.error(error?.response?.data?.message || '加载会员中心失败'))
       .finally(() => setLoading(false))
   }, [userToken])
@@ -1406,7 +1434,7 @@ function MemberCenterPage() {
 }
 
 function StoreDirectoryPage() {
-  const [stores, setStores] = useState([])
+  const [stores, setStores] = useState(() => readCachedJson('ms_storefront_stores', []))
   const user = (() => {
     try {
       return JSON.parse(localStorage.getItem('ms_user') || 'null')
@@ -1416,7 +1444,10 @@ function StoreDirectoryPage() {
   })()
 
   useEffect(() => {
-    api.get('/stores').then(({ data }) => setStores(data)).catch(() => toast.error('获取商家列表失败'))
+    api.get('/stores').then(({ data }) => {
+      setStores(data)
+      writeCachedJson('ms_storefront_stores', data)
+    }).catch(() => toast.error('获取商家列表失败'))
   }, [])
 
   return (
@@ -1453,7 +1484,7 @@ function StoreDirectoryPage() {
 }
 
 function MerchantCenterPage() {
-  const [dashboard, setDashboard] = useState({ user: null, products: [], orders: [], payout_requests: [], wallet_logs: [], checked_in_today: false })
+  const [dashboard, setDashboard] = useState(() => readCachedJson('ms_merchant_dashboard_cache', { user: null, products: [], orders: [], payout_requests: [], wallet_logs: [], checked_in_today: false }))
   const [loading, setLoading] = useState(true)
   const [storeForm, setStoreForm] = useState({ store_name: '', store_description: '', store_notice: '' })
   const [payoutForm, setPayoutForm] = useState({ amount: '0', note: '' })
@@ -1473,6 +1504,7 @@ function MerchantCenterPage() {
   const loadDashboard = async () => {
     const { data } = await api.get('/merchant/dashboard', authHeader(userToken))
     setDashboard(data)
+    writeCachedJson('ms_merchant_dashboard_cache', data)
     setStoreForm({
       store_name: data.user?.store_name || '',
       store_description: data.user?.store_description || '',
@@ -1774,7 +1806,7 @@ function MerchantCenterPage() {
 }
 
 function RechargePage() {
-  const [siteContent, setSiteContent] = useState(createDefaultSiteContent)
+  const [siteContent, setSiteContent] = useState(() => ({ ...createDefaultSiteContent(), ...readCachedJson('ms_storefront_site_content', {}) }))
   const [amount, setAmount] = useState('100')
   const user = (() => {
     try {
@@ -1785,7 +1817,11 @@ function RechargePage() {
   })()
 
   useEffect(() => {
-    api.get('/site-content').then(({ data }) => setSiteContent({ ...createDefaultSiteContent(), ...data })).catch(() => {})
+    api.get('/site-content').then(({ data }) => {
+      const nextContent = { ...createDefaultSiteContent(), ...data }
+      setSiteContent(nextContent)
+      writeCachedJson('ms_storefront_site_content', nextContent)
+    }).catch(() => {})
   }, [])
 
   const rechargeAmount = Math.max(0, Number(amount) || 0)
@@ -1830,7 +1866,7 @@ function RechargePage() {
 }
 
 function AnnouncementsPage() {
-  const [announcements, setAnnouncements] = useState([])
+  const [announcements, setAnnouncements] = useState(() => readCachedJson('ms_announcements_cache', []))
   const user = (() => {
     try {
       return JSON.parse(localStorage.getItem('ms_user') || 'null')
@@ -1840,7 +1876,10 @@ function AnnouncementsPage() {
   })()
 
   useEffect(() => {
-    api.get('/announcements').then(({ data }) => setAnnouncements(data)).catch(() => toast.error('获取公告失败'))
+    api.get('/announcements').then(({ data }) => {
+      setAnnouncements(data)
+      writeCachedJson('ms_announcements_cache', data)
+    }).catch(() => toast.error('获取公告失败'))
   }, [])
 
   return (
@@ -1905,16 +1944,16 @@ function AdminShell() {
   const [tokenReady, setTokenReady] = useState(false)
   const [admin, setAdmin] = useState(null)
   const [section, setSection] = useState('orders')
-  const [products, setProducts] = useState([])
-  const [orders, setOrders] = useState([])
-  const [admins, setAdmins] = useState([])
-  const [users, setUsers] = useState([])
-  const [invites, setInvites] = useState([])
-  const [feedbacks, setFeedbacks] = useState([])
-  const [announcements, setAnnouncements] = useState([])
-  const [payoutRequests, setPayoutRequests] = useState([])
-  const [merchantOverview, setMerchantOverview] = useState({ merchants: [], orders: [], payout_requests: [], wallet_logs: [] })
-  const [siteContentForm, setSiteContentForm] = useState(createDefaultSiteContent)
+  const [products, setProducts] = useState(() => readCachedJson('ms_admin_products_cache', []))
+  const [orders, setOrders] = useState(() => readCachedJson('ms_admin_orders_cache', []))
+  const [admins, setAdmins] = useState(() => readCachedJson('ms_admin_admins_cache', []))
+  const [users, setUsers] = useState(() => readCachedJson('ms_admin_users_cache', []))
+  const [invites, setInvites] = useState(() => readCachedJson('ms_admin_invites_cache', []))
+  const [feedbacks, setFeedbacks] = useState(() => readCachedJson('ms_admin_feedbacks_cache', []))
+  const [announcements, setAnnouncements] = useState(() => readCachedJson('ms_admin_announcements_cache', []))
+  const [payoutRequests, setPayoutRequests] = useState(() => readCachedJson('ms_admin_payout_requests_cache', []))
+  const [merchantOverview, setMerchantOverview] = useState(() => readCachedJson('ms_admin_merchant_overview_cache', { merchants: [], orders: [], payout_requests: [], wallet_logs: [] }))
+  const [siteContentForm, setSiteContentForm] = useState(() => ({ ...createDefaultSiteContent(), ...readCachedJson('ms_admin_site_content_cache', {}) }))
   const [statusFilter, setStatusFilter] = useState('all')
   const [feedbackStatusFilter, setFeedbackStatusFilter] = useState('all')
   const [inviteUsageFilter, setInviteUsageFilter] = useState('all')
@@ -1972,53 +2011,73 @@ function AdminShell() {
 
   const loadOrders = async () => {
     const { data } = await api.get('/admin/orders', { params: { status: statusFilter } })
-    setOrders(extractList(data))
+    const next = extractList(data)
+    setOrders(next)
+    writeCachedJson('ms_admin_orders_cache', next)
   }
 
   const loadProducts = async () => {
     const { data } = await api.get('/admin/products')
-    setProducts(extractList(data, 'all'))
+    const next = extractList(data, 'all')
+    setProducts(next)
+    writeCachedJson('ms_admin_products_cache', next)
   }
 
   const loadAdmins = async () => {
     const { data } = await api.get('/admin/admins')
-    setAdmins(extractList(data))
+    const next = extractList(data)
+    setAdmins(next)
+    writeCachedJson('ms_admin_admins_cache', next)
   }
 
   const loadUsers = async (search = userSearch) => {
     const keyword = search.trim()
     const { data } = await api.get('/admin/users', { params: keyword ? { search: keyword } : {} })
-    setUsers(extractList(data))
+    const next = extractList(data)
+    setUsers(next)
+    writeCachedJson('ms_admin_users_cache', next)
   }
 
   const loadInvites = async () => {
     const { data } = await api.get('/admin/invites')
-    setInvites(extractList(data))
+    const next = extractList(data)
+    setInvites(next)
+    writeCachedJson('ms_admin_invites_cache', next)
   }
 
   const loadFeedbacks = async () => {
     const { data } = await api.get('/admin/feedbacks', { params: { status: feedbackStatusFilter } })
-    setFeedbacks(extractList(data))
+    const next = extractList(data)
+    setFeedbacks(next)
+    writeCachedJson('ms_admin_feedbacks_cache', next)
   }
 
   const loadAnnouncements = async () => {
     const { data } = await api.get('/admin/announcements')
-    setAnnouncements(extractList(data))
+    const next = extractList(data)
+    setAnnouncements(next)
+    writeCachedJson('ms_admin_announcements_cache', next)
   }
 
   const loadPayoutRequests = async () => {
     const { data } = await api.get('/admin/payout-requests')
-    setPayoutRequests(extractList(data))
+    const next = extractList(data)
+    setPayoutRequests(next)
+    writeCachedJson('ms_admin_payout_requests_cache', next)
   }
 
   const loadMerchantOverview = async () => {
     const { data } = await api.get('/admin/merchant-overview')
-    setMerchantOverview(normalizeMerchantOverview(data))
+    const next = normalizeMerchantOverview(data)
+    setMerchantOverview(next)
+    writeCachedJson('ms_admin_merchant_overview_cache', next)
   }
 
   const loadSiteContent = async () => {
     const { data } = await api.get('/admin/site-content')
-    setSiteContentForm({ ...createDefaultSiteContent(), ...data })
+    const next = { ...createDefaultSiteContent(), ...data }
+    setSiteContentForm(next)
+    writeCachedJson('ms_admin_site_content_cache', next)
   }
 
   const filteredAdminProducts = useMemo(() => {
